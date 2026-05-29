@@ -14,6 +14,7 @@ class SimConfig:
     max_days: int = 10
     ticks_per_day: int = 144
     seed: int = 1
+    enable_initial_discoverables: bool = False
 
     day_start_tick: int = 36
     night_start_tick: int = 108

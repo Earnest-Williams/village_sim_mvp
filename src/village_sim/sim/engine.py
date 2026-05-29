@@ -5,18 +5,34 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass, field
 
-from village_sim.agent.memory import AgentMemory
+from village_sim.agent.memory import AgentMemory, DiscoverableAgentMemory
 from village_sim.agent.needs import update_needs
 from village_sim.agent.perception import Observation, perceive
 from village_sim.agent.policy import choose_and_execute_action
 from village_sim.agent.state import AgentState
 from village_sim.core.config import SimConfig
 from village_sim.core.time import SimClock, clock_from_tick
-from village_sim.core.types import ResourceKind
+from village_sim.core.types import ActionKind, PrimitiveAction, ResourceKind
+from village_sim.goap.planner import PlanStep, plan
+from village_sim.orchestrator.action_model import (
+    ActionLibrary,
+    ActionLifecycle,
+)
+from village_sim.orchestrator.orchestrator import Orchestrator
+from village_sim.orchestrator.snapshotting import make_state_snapshot
+from village_sim.orchestrator.symbolic import FactValue, extract_symbolic_state
+from village_sim.orchestrator.trajectory import Trajectory, TrajectoryRecorder
 from village_sim.sim.events import TickEvent
 from village_sim.sim.metrics import SimResult
 from village_sim.sim.snapshot import AgentSnapshot, WorldSnapshot
 from village_sim.view.ascii_view import render_ascii_map
+from village_sim.world.discoverables import (
+    Discoverable,
+    discoverable_at_or_adjacent,
+    exploit_discoverable,
+    make_initial_discoverables,
+    update_discoverable_memory,
+)
 from village_sim.world.grid import index_of
 from village_sim.world.world import World, choose_spawn_position, generate_world
 
@@ -33,18 +49,36 @@ class Simulation:
     world: World = field(init=False)
     agent: AgentState = field(init=False)
     memory: AgentMemory = field(init=False)
+    discoverable_memory: DiscoverableAgentMemory = field(init=False)
+    orchestrator: Orchestrator = field(init=False)
+    action_library: ActionLibrary = field(init=False)
+    recorded_trajectories: list[Trajectory] = field(
+        default_factory=lambda: list[Trajectory]()
+    )
     tick: int = 0
-    events: list[TickEvent] = field(default_factory=list)
-    snapshots: list[WorldSnapshot] = field(default_factory=list)
+    events: list[TickEvent] = field(default_factory=lambda: list[TickEvent]())
+    snapshots: list[WorldSnapshot] = field(
+        default_factory=lambda: list[WorldSnapshot]()
+    )
 
     def __post_init__(self) -> None:
         self.config.validate()
         self.rng = random.Random(self.config.seed)
-        self.world = generate_world(self.config, self.rng)
+        initial_discoverables: dict[str, Discoverable] | None = None
+        if self.config.enable_initial_discoverables:
+            initial_discoverables = make_initial_discoverables()
+        self.world = generate_world(
+            self.config,
+            self.rng,
+            discoverables=initial_discoverables,
+        )
         spawn_position = choose_spawn_position(self.world, self.rng)
         self.agent = AgentState(agent_id=1, position=spawn_position)
         self.agent.ensure_visit_buffer(self.world.width * self.world.height)
         self.memory = AgentMemory()
+        self.discoverable_memory = DiscoverableAgentMemory()
+        self.orchestrator = Orchestrator()
+        self.action_library = ActionLibrary()
         self._log("spawn", "agent spawned")
 
     def step(self) -> None:
@@ -142,6 +176,27 @@ class Simulation:
                     self.agent.food_discoveries += 1
                     self._log("memory", "discovered food")
 
+        new_discoverable_ids: list[str] = update_discoverable_memory(
+            self.discoverable_memory,
+            observation.discoverables,
+            self.tick,
+        )
+        for discoverable_id in new_discoverable_ids:
+            item = self.world.discoverables.get(discoverable_id)
+            if item is not None:
+                item.discovered = True
+            self._log("memory", f"discovered {discoverable_id}")
+
+        interaction_ticks = self._try_record_discoverable_exploitation(
+            clock, observation
+        )
+        if interaction_ticks > 0:
+            update_needs(self.agent, self.config)
+            self._advance_interaction_ticks(interaction_ticks)
+            if not self.agent.alive:
+                self._log_agent_death()
+            return
+
         action_message: str = choose_and_execute_action(
             self.agent,
             self.memory,
@@ -159,10 +214,137 @@ class Simulation:
 
         update_needs(self.agent, self.config)
         if not self.agent.alive:
-            reason: str = "unknown"
-            if self.agent.death_reason is not None:
-                reason = self.agent.death_reason.value
-            self._log("death", f"agent died from {reason}")
+            self._log_agent_death()
+
+    def _try_record_discoverable_exploitation(
+        self,
+        clock: SimClock,
+        observation: Observation,
+    ) -> int:
+        item = discoverable_at_or_adjacent(
+            self.world,
+            self.agent.position.x,
+            self.agent.position.y,
+        )
+        if item is None:
+            return 0
+        if not self._should_exploit_discoverable(item):
+            return 0
+
+        before_snapshot = make_state_snapshot(
+            tick=self.tick,
+            agent=self.agent,
+            observation=observation,
+            discoverable_memory=self.discoverable_memory,
+            clock=clock,
+        )
+        success: bool = exploit_discoverable(self.agent, item)
+        after_tick: int = self.tick + item.interaction_ticks
+        after_clock: SimClock = clock_from_tick(after_tick, self.config)
+        after_observation: Observation = perceive(
+            self.world,
+            self.agent.position,
+            after_clock,
+            self.config,
+        )
+        update_discoverable_memory(
+            self.discoverable_memory,
+            after_observation.discoverables,
+            after_tick,
+        )
+        after_snapshot = make_state_snapshot(
+            tick=after_tick,
+            agent=self.agent,
+            observation=after_observation,
+            discoverable_memory=self.discoverable_memory,
+            clock=after_clock,
+        )
+        task_name: str = item.satisfies_need
+        primitive_action: PrimitiveAction = PrimitiveAction.WAIT
+        if item.satisfies_need == "thirst":
+            primitive_action = PrimitiveAction.DRINK
+            self.agent.current_action = ActionKind.DRINK
+        elif item.satisfies_need == "hunger":
+            primitive_action = PrimitiveAction.EAT
+            self.agent.current_action = ActionKind.EAT
+
+        recorder = TrajectoryRecorder(
+            trajectory_id=f"traj_live_{self.agent.agent_id}_{self.tick}_{item.discoverable_id}",
+            policy_id=f"policy_exploit_{item.kind.value}_v1",
+            task_name=task_name,
+        )
+        event_name = "success" if success else "failed"
+        recorder.record(
+            before=before_snapshot,
+            action=primitive_action,
+            after=after_snapshot,
+            reward=1.0 if success else -1.0,
+            events=[f"exploit:{item.discoverable_id}:{event_name}"],
+        )
+        trajectory = recorder.finish()
+        self.recorded_trajectories.append(trajectory)
+        self.orchestrator.record(trajectory)
+        for action in self.orchestrator.synthesize_all():
+            self.action_library.add(action)
+
+        self._log("action", f"exploit {item.discoverable_id} {event_name}")
+        return item.interaction_ticks
+
+    def _advance_interaction_ticks(self, interaction_ticks: int) -> None:
+        extra_ticks: int = max(0, interaction_ticks - 1)
+        while extra_ticks > 0 and self.tick < self.config.max_ticks() - 1:
+            self.tick += 1
+            busy_clock: SimClock = clock_from_tick(self.tick, self.config)
+            raining: bool = self.world.step_environment(
+                self.rng, self.config, busy_clock.tick_of_day
+            )
+            if raining and self.tick % 12 == 0:
+                self._log("weather", "rain fell")
+            update_needs(self.agent, self.config)
+            extra_ticks -= 1
+            if not self.agent.alive:
+                return
+
+    def _should_exploit_discoverable(self, item: Discoverable) -> bool:
+        if item.amount <= 0.0:
+            return False
+        if item.satisfies_need == "thirst":
+            return self.agent.thirst >= 0.60
+        if item.satisfies_need == "hunger":
+            return self.agent.hunger >= 0.60
+        return False
+
+    def current_goap_plan(self, goal: dict[str, FactValue]) -> list[PlanStep]:
+        """Return flat GOAP candidates from the current live symbolic state.
+
+        TODO: add learned or built-in travel actions before replacing policy with
+        full WalkTo -> Exploit chaining.
+        """
+        clock: SimClock = clock_from_tick(self.tick, self.config)
+        observation: Observation = perceive(
+            self.world,
+            self.agent.position,
+            clock,
+            self.config,
+        )
+        symbolic = extract_symbolic_state(
+            self.agent,
+            observation,
+            self.discoverable_memory,
+            clock,
+        )
+        return plan(
+            symbolic,
+            goal,
+            self.action_library.all_actions(),
+            agent_lifecycle_floor=ActionLifecycle.CANDIDATE,
+        )
+
+    def _log_agent_death(self) -> None:
+        reason: str = "unknown"
+        if self.agent.death_reason is not None:
+            reason = self.agent.death_reason.value
+        self._log("death", f"agent died from {reason}")
 
     def _log(self, kind: str, message: str) -> None:
         clock: SimClock = clock_from_tick(self.tick, self.config)

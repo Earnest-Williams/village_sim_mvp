@@ -29,6 +29,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="print an ASCII map at the end of the run",
     )
     parser.add_argument(
+        "--discoverables",
+        action="store_true",
+        help="seed the live world with spring_001 and berry_bush_001",
+    )
+    parser.add_argument(
         "--local-map-radius",
         type=int,
         default=0,
@@ -72,13 +77,16 @@ def main() -> None:
         height=args.height,
         max_days=args.days,
         seed=args.seed,
+        enable_initial_discoverables=args.discoverables,
     )
     sim = Simulation(config)
     result: SimResult = sim.run(snapshot_every=args.snapshot_every)
     print_result(result)
 
     if args.print_map:
-        radius: int | None = None if args.local_map_radius <= 0 else args.local_map_radius
+        radius: int | None = (
+            None if args.local_map_radius <= 0 else args.local_map_radius
+        )
         print(render_ascii_map(sim.world, sim.agent, radius=radius))
 
     if args.replay is not None:
@@ -94,13 +102,18 @@ def run_batch(args: argparse.Namespace) -> None:
             height=args.height,
             max_days=args.days,
             seed=args.seed + offset,
+            enable_initial_discoverables=args.discoverables,
         )
         sim = Simulation(config)
         results.append(sim.run())
 
     survived_count: int = sum(1 for result in results if result.survived)
-    average_days: float = sum(result.days_elapsed for result in results) / float(len(results))
-    average_distance: float = sum(result.distance_walked for result in results) / float(len(results))
+    average_days: float = sum(result.days_elapsed for result in results) / float(
+        len(results)
+    )
+    average_distance: float = sum(result.distance_walked for result in results) / float(
+        len(results)
+    )
     print(f"Batch runs: {len(results)}")
     print(f"Survived full duration: {survived_count}/{len(results)}")
     print(f"Average days elapsed: {average_days:.2f}")

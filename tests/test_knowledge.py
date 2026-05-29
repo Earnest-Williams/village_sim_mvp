@@ -57,6 +57,14 @@ class TestImportedConfidence(unittest.TestCase):
         )
         self.assertEqual(result, 0.0)
 
+    def test_acceptance_confidence_example(self) -> None:
+        result = imported_confidence(
+            source_action_confidence=0.9,
+            trust_in_source=0.7,
+            transfer_quality=0.8,
+        )
+        self.assertEqual(result, 0.504)
+
 
 class TestPacketSerialisationRoundTrip(unittest.TestCase):
     def test_world_fact_packet_round_trip(self) -> None:
@@ -122,7 +130,7 @@ class TestPacketSerialisationRoundTrip(unittest.TestCase):
             loaded = load_packets(path)
 
         self.assertEqual(len(loaded), 2)
-        types = {p["knowledge_type"] for p in loaded}
+        types: list[object] = [packet["knowledge_type"] for packet in loaded]
         self.assertIn("world_fact", types)
         self.assertIn("action_model", types)
 

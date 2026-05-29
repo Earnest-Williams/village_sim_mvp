@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
 
+from village_sim.core.types import Position
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -100,15 +101,20 @@ class DiscoverableWorld:
     discoverables: dict[str, Discoverable]
 
 
+def make_initial_discoverables() -> dict[str, Discoverable]:
+    """Return fresh canonical discoverables for optional live-world seeding."""
+    return {
+        "spring_001": make_spring_001(),
+        "berry_bush_001": make_berry_bush_001(),
+    }
+
+
 def make_discoverable_test_world() -> DiscoverableWorld:
     """Return a deterministic 64×64 world with spring_001 and berry_bush_001."""
     return DiscoverableWorld(
         width=64,
         height=64,
-        discoverables={
-            "spring_001": make_spring_001(),
-            "berry_bush_001": make_berry_bush_001(),
-        },
+        discoverables=make_initial_discoverables(),
     )
 
 
@@ -192,19 +198,24 @@ class DiscoverableMemory:
 class DiscoverableAgentMemory:
     """ID-indexed discoverable knowledge for one agent."""
 
-    discoverables: dict[str, DiscoverableMemory] = field(default_factory=dict)
+    discoverables: dict[str, DiscoverableMemory] = field(
+        default_factory=lambda: dict[str, DiscoverableMemory]()
+    )
 
 
 def update_discoverable_memory(
     memory: DiscoverableAgentMemory,
     observations: list[DiscoverableObservation],
     tick: int,
-) -> None:
-    """Upsert discoverable memories from the current tick's observations.
+) -> list[str]:
+    """Upsert discoverable memories and return newly seen discoverable IDs.
 
     First sighting sets confidence=1.0; subsequent sightings refresh it.
     """
+    newly_discovered: list[str] = []
     for item in observations:
+        if item.discoverable_id not in memory.discoverables:
+            newly_discovered.append(item.discoverable_id)
         memory.discoverables[item.discoverable_id] = DiscoverableMemory(
             discoverable_id=item.discoverable_id,
             kind=item.kind,
@@ -214,9 +225,19 @@ def update_discoverable_memory(
             last_known_amount=item.amount,
             confidence=1.0,
         )
+    return newly_discovered
 
 
 # ── Interaction (§28) ────────────────────────────────────────────────────────
+
+
+class HasNeeds(Protocol):
+    """Structural type for objects with mutable survival need fields."""
+
+    hunger: float
+    thirst: float
+    fatigue: float
+    health: float
 
 
 @dataclass(slots=True)
@@ -233,8 +254,24 @@ def _clamp(value: float) -> float:
     return max(0.0, min(1.0, value))
 
 
+def discoverable_at_or_adjacent(
+    world: HasDiscoverables,
+    x: int,
+    y: int,
+) -> Discoverable | None:
+    """Return the closest discoverable within Chebyshev distance one."""
+    best: Discoverable | None = None
+    best_distance: int = 2
+    for item in world.discoverables.values():
+        distance: int = max(abs(item.x - x), abs(item.y - y))
+        if distance <= 1 and distance < best_distance:
+            best = item
+            best_distance = distance
+    return best
+
+
 def exploit_discoverable(
-    agent_needs: AgentNeeds,
+    agent_needs: HasNeeds,
     item: Discoverable,
 ) -> bool:
     """Apply one interaction with a discoverable to the agent's needs.
@@ -257,6 +294,20 @@ def exploit_discoverable(
         item.amount = max(0.0, item.amount - 1.0)
 
     return True
+
+
+def exploit_nearby_discoverable(
+    world: HasDiscoverables,
+    agent_needs: HasNeeds,
+    position: Position,
+) -> str | None:
+    """Exploit an adjacent discoverable and return its ID on success."""
+    item = discoverable_at_or_adjacent(world, position.x, position.y)
+    if item is None:
+        return None
+    if not exploit_discoverable(agent_needs, item):
+        return None
+    return item.discoverable_id
 
 
 # ── Regrowth (§29) ───────────────────────────────────────────────────────────
