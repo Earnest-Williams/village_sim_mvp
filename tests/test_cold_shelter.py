@@ -88,6 +88,15 @@ class TestColdShelter(unittest.TestCase):
 
         self.assertEqual(symbolic["target_type"], "freshwater_spring")
 
+        agent.cold_stress = 0.98
+        symbolic = extract_symbolic_state(
+            agent=agent,
+            observation=Observation(),
+            disc_memory=memory,
+            clock=clock,
+        )
+        self.assertEqual(symbolic["target_type"], "cave")
+
     def test_agent_state_and_cold_update(self) -> None:
         agent = AgentState(agent_id=1, position=Position(0, 0))
         config = SimConfig()
