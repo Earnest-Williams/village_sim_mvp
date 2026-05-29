@@ -8,6 +8,26 @@ from typing import Literal
 from village_sim.core.config import SimConfig
 
 ColdReason = Literal["none", "night", "rain", "night_rain", "day"]
+ColdStatus = Literal["ok", "cold", "severe"]
+
+COLD_REASON_NONE: ColdReason = "none"
+COLD_REASON_NIGHT: ColdReason = "night"
+COLD_REASON_RAIN: ColdReason = "rain"
+COLD_REASON_NIGHT_RAIN: ColdReason = "night_rain"
+COLD_REASON_DAY: ColdReason = "day"
+
+COLD_STATUS_OK: ColdStatus = "ok"
+COLD_STATUS_COLD: ColdStatus = "cold"
+COLD_STATUS_SEVERE: ColdStatus = "severe"
+
+WEATHER_COLD_NIGHT = "cold night"
+WEATHER_COLD_RAIN = "cold rain"
+WEATHER_COLD_NIGHT_RAIN = "cold night rain"
+WEATHER_COLD_DAY = "cold day"
+STATUS_AGENT_COLD = "agent is cold"
+STATUS_AGENT_SEVERELY_COLD = "agent is severely cold"
+SEEKING_SHELTER_ACTION_PREFIX = "seeking shelter at "
+SHELTERED_ACTION_PREFIX = "sheltered at "
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,16 +54,16 @@ def make_weather_state(
     rain_penalty_c: float = config.rain_temperature_penalty_c if is_raining else 0.0
     temperature_c: float = base_temperature_c - rain_penalty_c
     feels_cold: bool = temperature_c <= config.cold_temperature_threshold_c
-    cold_reason: ColdReason = "none"
+    cold_reason: ColdReason = COLD_REASON_NONE
     if feels_cold:
         if is_night and is_raining:
-            cold_reason = "night_rain"
+            cold_reason = COLD_REASON_NIGHT_RAIN
         elif is_night:
-            cold_reason = "night"
+            cold_reason = COLD_REASON_NIGHT
         elif is_raining:
-            cold_reason = "rain"
+            cold_reason = COLD_REASON_RAIN
         else:
-            cold_reason = "day"
+            cold_reason = COLD_REASON_DAY
     return WeatherState(
         is_raining=is_raining,
         temperature_c=temperature_c,

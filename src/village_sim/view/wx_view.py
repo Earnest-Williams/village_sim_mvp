@@ -246,12 +246,6 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
             len(sim.snapshots),
             options.action_library_out,
             options.replay,
-            sim.current_weather.temperature_c,
-            sim.current_weather.feels_cold,
-            sim._agent_is_sheltered(),
-            self._count_matching_events(sim, "weather", "cold"),
-            self._count_matching_events(sim, "status", "cold"),
-            self._count_matching_events(sim, "action", "shelter"),
         )
         map_str: str = ""
         if options.print_map:
@@ -286,13 +280,22 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
             f"Survived full duration: {survived_count}/{len(results)}",
             f"Average days elapsed: {average_days:.2f}",
             f"Average distance walked: {average_distance:.1f}",
-            "seed,days,survived,death,water_sites,food_sites,distance",
+            (
+                "seed,days,survived,death,water_sites,food_sites,distance,"
+                "final_cold_stress,final_temperature_c,final_feels_cold,"
+                "final_is_sheltered,cold_weather_events,cold_status_events,"
+                "shelter_events"
+            ),
         ]
         for result in results:
             lines.append(
                 f"{result.seed},{result.days_elapsed:.2f},{result.survived},"
                 f"{result.death_reason},{result.remembered_water_sites},"
-                f"{result.remembered_food_sites},{result.distance_walked}"
+                f"{result.remembered_food_sites},{result.distance_walked},"
+                f"{result.final_cold_stress:.2f},{result.final_temperature_c:.1f},"
+                f"{result.final_feels_cold},{result.final_is_sheltered},"
+                f"{result.cold_weather_events},{result.cold_status_events},"
+                f"{result.shelter_events}"
             )
         if options.action_library_in is not None:
             lines.append("Action library input is ignored for batch runs.")
@@ -303,16 +306,6 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
         if options.snapshot_every > 0:
             lines.append("Snapshot capture is ignored for batch runs.")
         return "\n".join(lines)
-
-    @staticmethod
-    def _count_matching_events(
-        sim: Simulation, kind: str, message_fragment: str
-    ) -> int:
-        return sum(
-            1
-            for event in sim.events
-            if event.kind == kind and message_fragment in event.message
-        )
 
     @staticmethod
     def _render_map(sim: Simulation, local_map_radius: int) -> str:
@@ -359,12 +352,6 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
         snapshot_count: int,
         action_library_out: Path | None,
         replay: Path | None,
-        final_temperature_c: float,
-        final_feels_cold: bool,
-        final_is_sheltered: bool,
-        cold_weather_events: int,
-        cold_status_events: int,
-        shelter_events: int,
     ) -> str:
         lines: list[str] = [
             f"Seed: {result.seed}",
@@ -386,14 +373,15 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
             f"Distance walked: {result.distance_walked}",
             (
                 "Final weather/cold: "
-                f"temp_c={final_temperature_c:.1f} "
-                f"feels_cold={final_feels_cold} "
-                f"sheltered={final_is_sheltered}"
+                f"temp_c={result.final_temperature_c:.1f} "
+                f"feels_cold={result.final_feels_cold} "
+                f"sheltered={result.final_is_sheltered}"
             ),
             (
                 "Cold events: "
-                f"weather={cold_weather_events} status={cold_status_events} "
-                f"shelter={shelter_events}"
+                f"weather={result.cold_weather_events} "
+                f"status={result.cold_status_events} "
+                f"shelter={result.shelter_events}"
             ),
             f"Events logged: {event_count}",
             f"Snapshots stored: {snapshot_count}",

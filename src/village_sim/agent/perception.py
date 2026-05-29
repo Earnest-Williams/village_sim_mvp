@@ -44,6 +44,13 @@ def perceive(
     weather: WeatherState | None = None,
     is_sheltered: bool | None = None,
 ) -> Observation:
+    """Build the agent observation for one tick.
+
+    Omitted weather or shelter context is a legacy test convenience. Production
+    engine and GOAP paths pass both values explicitly so observations reflect
+    live simulation state.
+    """
+
     if weather is None:
         weather = make_weather_state(
             is_raining=False,

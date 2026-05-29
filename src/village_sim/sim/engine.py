@@ -24,6 +24,11 @@ from village_sim.orchestrator.orchestrator import Orchestrator
 from village_sim.orchestrator.snapshotting import make_state_snapshot
 from village_sim.orchestrator.symbolic import FactValue, extract_symbolic_state
 from village_sim.orchestrator.trajectory import Trajectory, TrajectoryRecorder
+from village_sim.sim.event_summary import (
+    count_cold_status_events,
+    count_cold_weather_events,
+    count_shelter_events,
+)
 from village_sim.sim.events import TickEvent
 from village_sim.sim.metrics import SimResult
 from village_sim.sim.snapshot import AgentSnapshot, WorldSnapshot
@@ -37,7 +42,26 @@ from village_sim.world.discoverables import (
     update_discoverable_memory,
 )
 from village_sim.world.grid import index_of
-from village_sim.world.weather import WeatherState, make_weather_state
+from village_sim.world.weather import (
+    COLD_REASON_DAY,
+    COLD_REASON_NIGHT,
+    COLD_REASON_NIGHT_RAIN,
+    COLD_REASON_RAIN,
+    COLD_STATUS_COLD,
+    COLD_STATUS_OK,
+    COLD_STATUS_SEVERE,
+    SHELTERED_ACTION_PREFIX,
+    SEEKING_SHELTER_ACTION_PREFIX,
+    STATUS_AGENT_COLD,
+    STATUS_AGENT_SEVERELY_COLD,
+    WEATHER_COLD_DAY,
+    WEATHER_COLD_NIGHT,
+    WEATHER_COLD_NIGHT_RAIN,
+    WEATHER_COLD_RAIN,
+    ColdStatus,
+    WeatherState,
+    make_weather_state,
+)
 from village_sim.world.world import World, choose_spawn_position, generate_world
 
 
@@ -66,7 +90,7 @@ class Simulation:
     )
     current_weather: WeatherState = field(init=False)
     _last_feels_cold: bool = field(default=False, init=False)
-    _last_cold_status_bucket: str = field(default="ok", init=False)
+    _last_cold_status_bucket: ColdStatus = field(default=COLD_STATUS_OK, init=False)
 
     def __post_init__(self) -> None:
         self.config.validate()
@@ -147,6 +171,13 @@ class Simulation:
             final_hunger=self.agent.hunger,
             final_fatigue=self.agent.fatigue,
             final_cold_stress=self.agent.cold_stress,
+            final_temperature_c=self.current_weather.temperature_c,
+            final_feels_cold=self.current_weather.feels_cold,
+            final_is_sheltered=self.agent_is_sheltered(),
+            final_cold_status=self._cold_status_bucket(self.agent.cold_stress),
+            cold_weather_events=count_cold_weather_events(self.events),
+            cold_status_events=count_cold_status_events(self.events),
+            shelter_events=count_shelter_events(self.events),
             water_discoveries=self.agent.water_discoveries,
             food_discoveries=self.agent.food_discoveries,
             distance_walked=self.agent.distance_walked,
@@ -169,7 +200,7 @@ class Simulation:
             goal=self.agent.current_goal.value,
             action=self.agent.current_action.value,
             feels_cold=self.current_weather.feels_cold,
-            is_sheltered=self._agent_is_sheltered(),
+            is_sheltered=self.agent_is_sheltered(),
             cold_status=self._cold_status_bucket(self.agent.cold_stress),
         )
         ascii_map: str | None = (
@@ -193,7 +224,7 @@ class Simulation:
         position_index: int = index_of(self.world.width, self.agent.position)
         self.agent.visited_counts[position_index] += 1
 
-        is_sheltered: bool = self._agent_is_sheltered()
+        is_sheltered: bool = self.agent_is_sheltered()
         observation: Observation = perceive(
             self.world,
             self.agent.position,
@@ -241,7 +272,7 @@ class Simulation:
                 self.config,
                 is_night=clock.is_night,
                 is_raining=weather.is_raining,
-                is_sheltered=self._agent_is_sheltered(),
+                is_sheltered=self.agent_is_sheltered(),
                 is_cold_exposed=weather.feels_cold,
             )
             self._log_cold_status_transition()
@@ -270,7 +301,7 @@ class Simulation:
             self.config,
             is_night=clock.is_night,
             is_raining=weather.is_raining,
-            is_sheltered=self._agent_is_sheltered(),
+            is_sheltered=self.agent_is_sheltered(),
             is_cold_exposed=weather.feels_cold,
         )
         self._log_cold_status_transition()
@@ -300,22 +331,28 @@ class Simulation:
             clock=clock,
         )
         if item.kind is DiscoverableKind.CAVE:
-            self._log("action", f"seeking shelter at {item.discoverable_id}")
+            self._log(
+                "action", f"{SEEKING_SHELTER_ACTION_PREFIX}{item.discoverable_id}"
+            )
         success: bool = exploit_discoverable(self.agent, item)
         after_tick: int = self.tick + item.interaction_ticks
-        after_clock: SimClock = clock_from_tick(after_tick, self.config)
+        # The exploit trajectory after-snapshot captures the immediate
+        # post-exploit state before multi-tick environmental advancement. The
+        # after_tick records modeled action duration for trajectory cost, while
+        # weather/daylight context remains the current tick;
+        # _advance_interaction_ticks() applies later environmental changes.
         after_weather: WeatherState = make_weather_state(
             is_raining=self.current_weather.is_raining,
-            is_night=after_clock.is_night,
+            is_night=clock.is_night,
             config=self.config,
         )
         after_observation: Observation = perceive(
             self.world,
             self.agent.position,
-            after_clock,
+            clock,
             self.config,
             after_weather,
-            self._agent_is_sheltered(),
+            self.agent_is_sheltered(),
         )
         update_discoverable_memory(
             self.discoverable_memory,
@@ -327,7 +364,7 @@ class Simulation:
             agent=self.agent,
             observation=after_observation,
             discoverable_memory=self.discoverable_memory,
-            clock=after_clock,
+            clock=clock,
         )
         task_name: str = item.satisfies_need
         primitive_action: PrimitiveAction = PrimitiveAction.WAIT
@@ -359,9 +396,11 @@ class Simulation:
         for action in self.orchestrator.synthesize_all():
             self.action_library.add(action)
 
-        if item.kind is DiscoverableKind.CAVE and success:
-            self._log("action", f"sheltered at {item.discoverable_id}")
-        self._log("action", f"exploit {item.discoverable_id} {event_name}")
+        if item.kind is DiscoverableKind.CAVE:
+            if success:
+                self._log("action", f"{SHELTERED_ACTION_PREFIX}{item.discoverable_id}")
+        else:
+            self._log("action", f"exploit {item.discoverable_id} {event_name}")
         return item.interaction_ticks
 
     def _advance_interaction_ticks(self, interaction_ticks: int) -> None:
@@ -386,7 +425,7 @@ class Simulation:
                 self.config,
                 is_night=busy_clock.is_night,
                 is_raining=weather.is_raining,
-                is_sheltered=self._agent_is_sheltered(),
+                is_sheltered=self.agent_is_sheltered(),
                 is_cold_exposed=weather.feels_cold,
             )
             self._log_cold_status_transition()
@@ -396,33 +435,33 @@ class Simulation:
 
     def _log_weather_transition(self, weather: WeatherState) -> None:
         if weather.feels_cold and not self._last_feels_cold:
-            if weather.cold_reason == "night":
-                self._log("weather", "cold night")
-            elif weather.cold_reason == "rain":
-                self._log("weather", "cold rain")
-            elif weather.cold_reason == "night_rain":
-                self._log("weather", "cold night rain")
-            elif weather.cold_reason == "day":
-                self._log("weather", "cold day")
+            if weather.cold_reason == COLD_REASON_NIGHT:
+                self._log("weather", WEATHER_COLD_NIGHT)
+            elif weather.cold_reason == COLD_REASON_RAIN:
+                self._log("weather", WEATHER_COLD_RAIN)
+            elif weather.cold_reason == COLD_REASON_NIGHT_RAIN:
+                self._log("weather", WEATHER_COLD_NIGHT_RAIN)
+            elif weather.cold_reason == COLD_REASON_DAY:
+                self._log("weather", WEATHER_COLD_DAY)
         self._last_feels_cold = weather.feels_cold
 
     def _log_cold_status_transition(self) -> None:
-        bucket: str = self._cold_status_bucket(self.agent.cold_stress)
+        bucket: ColdStatus = self._cold_status_bucket(self.agent.cold_stress)
         if bucket == self._last_cold_status_bucket:
             return
-        if bucket == "cold":
-            self._log("status", "agent is cold")
-        elif bucket == "severe":
-            self._log("status", "agent is severely cold")
+        if bucket == COLD_STATUS_COLD:
+            self._log("status", STATUS_AGENT_COLD)
+        elif bucket == COLD_STATUS_SEVERE:
+            self._log("status", STATUS_AGENT_SEVERELY_COLD)
         self._last_cold_status_bucket = bucket
 
     @staticmethod
-    def _cold_status_bucket(cold_stress: float) -> str:
+    def _cold_status_bucket(cold_stress: float) -> ColdStatus:
         if cold_stress >= 0.60:
-            return "severe"
+            return COLD_STATUS_SEVERE
         if cold_stress >= 0.30:
-            return "cold"
-        return "ok"
+            return COLD_STATUS_COLD
+        return COLD_STATUS_OK
 
     def record_discoverable_exploitation(
         self,
@@ -435,6 +474,11 @@ class Simulation:
     def advance_interaction_ticks(self, interaction_ticks: int) -> None:
         """Advance time while an explicit multi-tick interaction is in progress."""
         self._advance_interaction_ticks(interaction_ticks)
+
+    def agent_is_sheltered(self) -> bool:
+        """Return whether the agent is currently sheltered by cave adjacency."""
+
+        return self._agent_is_sheltered()
 
     def _agent_is_sheltered(self) -> bool:
         item = discoverable_at_or_adjacent(
@@ -464,7 +508,7 @@ class Simulation:
             clock,
             self.config,
             self.current_weather,
-            self._agent_is_sheltered(),
+            self.agent_is_sheltered(),
         )
         symbolic = extract_symbolic_state(
             self.agent,
