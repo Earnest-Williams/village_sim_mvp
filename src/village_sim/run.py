@@ -14,6 +14,11 @@ from village_sim.view.ascii_view import render_ascii_map
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the Village Sim MVP.")
+    parser.add_argument(
+        "--wx",
+        action="store_true",
+        help="launch the wxPython interface instead of running in the terminal",
+    )
     parser.add_argument("--seed", type=int, default=1, help="deterministic RNG seed")
     parser.add_argument("--days", type=int, default=10, help="number of simulated days")
     parser.add_argument("--width", type=int, default=32, help="world width in cells")
@@ -53,6 +58,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser: argparse.ArgumentParser = build_parser()
     args: argparse.Namespace = parser.parse_args()
+
+    if args.wx:
+        launch_wx_interface()
+        return
 
     if args.batch > 1:
         run_batch(args)
@@ -125,6 +134,18 @@ def print_result(result: SimResult) -> None:
         f"remembered_food={result.remembered_food_sites}"
     )
     print(f"Distance walked: {result.distance_walked}")
+
+
+def launch_wx_interface() -> None:
+    try:
+        from village_sim.view.wx_view import main as wx_main
+    except ImportError as exc:
+        if getattr(exc, "name", None) == "wx":
+            raise SystemExit(
+                'wxPython is required for --wx. Install it with: python -m pip install "village-sim-mvp[gui]"'
+            ) from exc
+        raise
+    wx_main()
 
 
 if __name__ == "__main__":

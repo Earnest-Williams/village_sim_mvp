@@ -43,6 +43,26 @@ Run several seeds:
 PYTHONPATH=src python -m village_sim --batch 25 --days 10 --width 32 --height 32
 ```
 
+## wxPython interface
+
+Install GUI dependencies:
+
+```bash
+python -m pip install -e ".[gui]"
+```
+
+Launch the GUI:
+
+```bash
+PYTHONPATH=src python -m village_sim --wx
+```
+
+or
+
+```bash
+village-sim-gui
+```
+
 ## Install editable
 
 ```bash
