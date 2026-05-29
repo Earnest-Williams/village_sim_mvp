@@ -17,6 +17,7 @@ def make_need_state(agent: AgentState) -> NeedState:
         thirst=agent.thirst,
         fatigue=agent.fatigue,
         health=agent.health,
+        cold_stress=agent.cold_stress,
     )
 
 

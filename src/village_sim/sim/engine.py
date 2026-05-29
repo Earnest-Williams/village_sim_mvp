@@ -30,6 +30,7 @@ from village_sim.sim.snapshot import AgentSnapshot, WorldSnapshot
 from village_sim.view.ascii_view import render_ascii_map
 from village_sim.world.discoverables import (
     Discoverable,
+    DiscoverableKind,
     discoverable_at_or_adjacent,
     exploit_discoverable,
     make_initial_discoverables,
@@ -95,7 +96,7 @@ class Simulation:
             self._log("weather", "rain fell")
 
         if self.agent.alive:
-            self._step_agent(clock)
+            self._step_agent(clock, raining)
 
         self.tick += 1
 
@@ -127,6 +128,7 @@ class Simulation:
             final_thirst=self.agent.thirst,
             final_hunger=self.agent.hunger,
             final_fatigue=self.agent.fatigue,
+            final_cold_stress=self.agent.cold_stress,
             water_discoveries=self.agent.water_discoveries,
             food_discoveries=self.agent.food_discoveries,
             distance_walked=self.agent.distance_walked,
@@ -143,6 +145,7 @@ class Simulation:
             thirst=self.agent.thirst,
             hunger=self.agent.hunger,
             fatigue=self.agent.fatigue,
+            cold_stress=self.agent.cold_stress,
             health=self.agent.health,
             alive=self.agent.alive,
             goal=self.agent.current_goal.value,
@@ -160,7 +163,7 @@ class Simulation:
             ascii_map=ascii_map,
         )
 
-    def _step_agent(self, clock: SimClock) -> None:
+    def _step_agent(self, clock: SimClock, raining: bool) -> None:
         self.agent.ensure_visit_buffer(self.world.width * self.world.height)
         position_index: int = index_of(self.world.width, self.agent.position)
         self.agent.visited_counts[position_index] += 1
@@ -202,7 +205,13 @@ class Simulation:
             clock, observation
         )
         if interaction_ticks > 0:
-            update_needs(self.agent, self.config)
+            update_needs(
+                self.agent,
+                self.config,
+                is_night=clock.is_night,
+                is_raining=raining,
+                is_sheltered=self._agent_is_sheltered(),
+            )
             self._advance_interaction_ticks(interaction_ticks)
             if not self.agent.alive:
                 self._log_agent_death()
@@ -223,7 +232,13 @@ class Simulation:
         ):
             self._log("action", action_message)
 
-        update_needs(self.agent, self.config)
+        update_needs(
+            self.agent,
+            self.config,
+            is_night=clock.is_night,
+            is_raining=raining,
+            is_sheltered=self._agent_is_sheltered(),
+        )
         if not self.agent.alive:
             self._log_agent_death()
 
@@ -278,6 +293,8 @@ class Simulation:
         elif item.satisfies_need == "hunger":
             primitive_action = PrimitiveAction.EAT
             self.agent.current_action = ActionKind.EAT
+        elif item.satisfies_need == "cold_stress":
+            self.agent.current_action = ActionKind.IDLE
 
         recorder = TrajectoryRecorder(
             trajectory_id=f"traj_live_{self.agent.agent_id}_{self.tick}_{item.discoverable_id}",
@@ -311,7 +328,13 @@ class Simulation:
             )
             if raining and self.tick % 12 == 0:
                 self._log("weather", "rain fell")
-            update_needs(self.agent, self.config)
+            update_needs(
+                self.agent,
+                self.config,
+                is_night=busy_clock.is_night,
+                is_raining=raining,
+                is_sheltered=self._agent_is_sheltered(),
+            )
             extra_ticks -= 1
             if not self.agent.alive:
                 return
@@ -328,6 +351,14 @@ class Simulation:
         """Advance time while an explicit multi-tick interaction is in progress."""
         self._advance_interaction_ticks(interaction_ticks)
 
+    def _agent_is_sheltered(self) -> bool:
+        item = discoverable_at_or_adjacent(
+            self.world,
+            self.agent.position.x,
+            self.agent.position.y,
+        )
+        return item is not None and item.kind is DiscoverableKind.CAVE
+
     def _should_exploit_discoverable(self, item: Discoverable) -> bool:
         if item.amount <= 0.0:
             return False
@@ -335,6 +366,8 @@ class Simulation:
             return self.agent.thirst >= 0.60
         if item.satisfies_need == "hunger":
             return self.agent.hunger >= 0.60
+        if item.satisfies_need == "cold_stress":
+            return self.agent.cold_stress >= 0.60
         return False
 
     def current_goap_plan(self, goal: dict[str, FactValue]) -> list[PlanStep]:
@@ -394,11 +427,15 @@ class Simulation:
         return results
 
     def _urgent_goap_goal(self) -> dict[str, FactValue] | None:
-        if self.agent.thirst >= 0.60:
-            return {"thirst_bucket": "low"}
-        if self.agent.hunger >= 0.60:
-            return {"hunger_bucket": "low"}
-        return None
+        urgent_needs: tuple[tuple[str, float], ...] = (
+            ("thirst_bucket", self.agent.thirst),
+            ("hunger_bucket", self.agent.hunger),
+            ("cold_stress_bucket", self.agent.cold_stress),
+        )
+        goal_name, goal_value = max(urgent_needs, key=lambda pair: pair[1])
+        if goal_value < 0.60:
+            return None
+        return {goal_name: "low"}
 
     def _log_agent_death(self) -> None:
         reason: str = "unknown"

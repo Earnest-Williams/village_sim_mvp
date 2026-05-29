@@ -7,7 +7,14 @@ from village_sim.core.config import SimConfig
 from village_sim.core.types import ActionKind, DeathReason
 
 
-def update_needs(agent: AgentState, config: SimConfig) -> None:
+def update_needs(
+    agent: AgentState,
+    config: SimConfig,
+    *,
+    is_night: bool = False,
+    is_raining: bool = False,
+    is_sheltered: bool = False,
+) -> None:
     """Advance biological needs by one tick."""
 
     if not agent.alive:
@@ -22,20 +29,35 @@ def update_needs(agent: AgentState, config: SimConfig) -> None:
         agent.fatigue += config.fatigue_gain_awake
         agent.awake_ticks += 1
 
+    if is_sheltered:
+        agent.cold_stress -= config.cold_recovery_shelter
+    else:
+        if is_night:
+            agent.cold_stress += config.cold_gain_night
+        if is_raining:
+            agent.cold_stress += config.cold_gain_rain
+        if not is_night and not is_raining:
+            agent.cold_stress -= config.cold_recovery_daylight
+
+    agent.clamp_needs()
+
     if agent.thirst >= 0.96:
         agent.health -= 0.025
     if agent.hunger >= 0.96:
         agent.health -= 0.012
     if agent.fatigue >= 0.98:
         agent.health -= 0.012
+    if agent.cold_stress >= config.cold_health_threshold:
+        agent.health -= config.cold_health_damage
 
     agent.clamp_needs()
 
     if agent.health <= 0.0:
         agent.alive = False
-        if agent.thirst >= agent.hunger and agent.thirst >= agent.fatigue:
-            agent.death_reason = DeathReason.THIRST
-        elif agent.hunger >= agent.fatigue:
-            agent.death_reason = DeathReason.HUNGER
-        else:
-            agent.death_reason = DeathReason.EXHAUSTION
+        severe_needs: dict[DeathReason, float] = {
+            DeathReason.THIRST: agent.thirst,
+            DeathReason.HUNGER: agent.hunger,
+            DeathReason.EXHAUSTION: agent.fatigue,
+            DeathReason.COLD: agent.cold_stress,
+        }
+        agent.death_reason = max(severe_needs, key=lambda reason: severe_needs[reason])

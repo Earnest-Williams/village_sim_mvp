@@ -13,6 +13,7 @@ class NeedName(StrEnum):
     HUNGER = "hunger"
     THIRST = "thirst"
     FATIGUE = "fatigue"
+    COLD_STRESS = "cold_stress"
 
 
 @dataclass(slots=True)
@@ -58,6 +59,10 @@ def evaluate_thirst_task(trajectory: Trajectory) -> TaskResult:
 
 def evaluate_fatigue_task(trajectory: Trajectory) -> TaskResult:
     return _evaluate_need_task(trajectory, NeedName.FATIGUE)
+
+
+def evaluate_cold_stress_task(trajectory: Trajectory) -> TaskResult:
+    return _evaluate_need_task(trajectory, NeedName.COLD_STRESS)
 
 
 # ── Trajectory clustering (§11) ──────────────────────────────────────────────

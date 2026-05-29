@@ -56,8 +56,10 @@ def extract_symbolic_state(
         "hunger_bucket": bucket_need(agent.hunger),
         "thirst_bucket": bucket_need(agent.thirst),
         "fatigue_bucket": bucket_need(agent.fatigue),
+        "cold_stress_bucket": bucket_need(agent.cold_stress),
         "health_low": agent.health < 0.30,
         "is_daylight": clock.is_daylight,
+        "is_night": clock.is_night,
     }
 
     # Closest discoverable in current observation (§7 example predicates)
@@ -94,7 +96,14 @@ def extract_symbolic_state(
         for m in disc_memory.discoverables.values()
     )
     state["known_water"] = known_water
+    known_shelter = any(
+        m.kind is DiscoverableKind.CAVE for m in disc_memory.discoverables.values()
+    )
     state["known_food"] = known_food
+    state["known_shelter"] = known_shelter
+    state["at_shelter"] = (
+        state.get("at_known_target") is True and state.get("target_type") == "cave"
+    )
 
     return state
 
@@ -145,6 +154,12 @@ def _choose_memory_target(
         preferred_kinds.extend(
             [DiscoverableKind.BERRY_BUSH, DiscoverableKind.FRESHWATER_SPRING]
         )
+    if agent.cold_stress >= agent.thirst and agent.cold_stress >= agent.hunger:
+        preferred_kinds.insert(0, DiscoverableKind.CAVE)
+    elif agent.cold_stress >= min(agent.thirst, agent.hunger):
+        preferred_kinds.insert(1, DiscoverableKind.CAVE)
+    else:
+        preferred_kinds.append(DiscoverableKind.CAVE)
 
     for kind in preferred_kinds:
         target = _best_memory_of_kind(disc_memory, kind)

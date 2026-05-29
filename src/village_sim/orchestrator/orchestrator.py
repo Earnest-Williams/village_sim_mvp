@@ -17,6 +17,7 @@ from village_sim.orchestrator.evaluator import (
     NeedName,
     TaskResult,
     cluster_key_for_trajectory,
+    evaluate_cold_stress_task,
     evaluate_fatigue_task,
     evaluate_hunger_task,
     evaluate_thirst_task,
@@ -35,6 +36,7 @@ _EVALUATORS = {
     NeedName.HUNGER: evaluate_hunger_task,
     NeedName.THIRST: evaluate_thirst_task,
     NeedName.FATIGUE: evaluate_fatigue_task,
+    NeedName.COLD_STRESS: evaluate_cold_stress_task,
 }
 
 
