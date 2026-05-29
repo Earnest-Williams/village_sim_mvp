@@ -2,7 +2,17 @@
 
 from __future__ import annotations
 
-import wx
+import threading
+
+try:
+    import wx
+except ImportError:
+    import sys
+
+    sys.exit(
+        "wxPython is required to run the GUI. "
+        'Please install it with: pip install "village-sim-mvp[gui]"'
+    )
 
 from village_sim.core.config import SimConfig
 from village_sim.sim.engine import Simulation
@@ -16,11 +26,9 @@ class VillageSimFrame(wx.Frame):
         panel = wx.Panel(self)
         root_sizer = wx.BoxSizer(wx.VERTICAL)
 
-        controls_sizer = wx.FlexGridSizer(rows=2, cols=8, vgap=8, hgap=8)
+        controls_sizer = wx.FlexGridSizer(rows=2, cols=4, vgap=8, hgap=8)
         controls_sizer.AddGrowableCol(1, 1)
         controls_sizer.AddGrowableCol(3, 1)
-        controls_sizer.AddGrowableCol(5, 1)
-        controls_sizer.AddGrowableCol(7, 1)
 
         self.seed_ctrl = wx.SpinCtrl(panel, min=1, max=1_000_000, initial=1)
         self.days_ctrl = wx.SpinCtrl(panel, min=1, max=365, initial=10)
@@ -36,19 +44,22 @@ class VillageSimFrame(wx.Frame):
         controls_sizer.Add(wx.StaticText(panel, label="Height"), 0, wx.ALIGN_CENTER_VERTICAL)
         controls_sizer.Add(self.height_ctrl, 1, wx.EXPAND)
 
-        run_button = wx.Button(panel, label="Run Simulation")
-        run_button.Bind(wx.EVT_BUTTON, self.on_run)
+        self.run_button = wx.Button(panel, label="Run Simulation")
+        self.run_button.Bind(wx.EVT_BUTTON, self.on_run)
 
         self.summary_ctrl = wx.TextCtrl(
             panel,
             style=wx.TE_MULTILINE | wx.TE_READONLY | wx.BORDER_NONE,
             size=(-1, 120),
         )
-        self.map_ctrl = wx.TextCtrl(panel, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP)
-        self.map_ctrl.SetFont(wx.Font(10, wx.FONTFAMILY_TELETYPE, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
+        self.summary_ctrl.SetBackgroundColour(panel.GetBackgroundColour())
+        self.map_ctrl = wx.TextCtrl(
+            panel, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.HSCROLL | wx.TE_DONTWRAP
+        )
+        self.map_ctrl.SetFont(wx.Font(wx.FontInfo(10).Family(wx.FONTFAMILY_TELETYPE)))
 
         root_sizer.Add(controls_sizer, 0, wx.EXPAND | wx.ALL, 12)
-        root_sizer.Add(run_button, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
+        root_sizer.Add(self.run_button, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
         root_sizer.Add(wx.StaticText(panel, label="Run Summary"), 0, wx.LEFT | wx.RIGHT, 12)
         root_sizer.Add(self.summary_ctrl, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
         root_sizer.Add(wx.StaticText(panel, label="ASCII Map"), 0, wx.LEFT | wx.RIGHT, 12)
@@ -58,16 +69,33 @@ class VillageSimFrame(wx.Frame):
         self.Centre()
 
     def on_run(self, _: wx.CommandEvent) -> None:
+        self.run_button.Disable()
         config = SimConfig(
             width=self.width_ctrl.GetValue(),
             height=self.height_ctrl.GetValue(),
             max_days=self.days_ctrl.GetValue(),
             seed=self.seed_ctrl.GetValue(),
         )
-        sim = Simulation(config)
-        result: SimResult = sim.run()
-        self.summary_ctrl.SetValue(self._format_result(result, len(sim.events)))
-        self.map_ctrl.SetValue(render_ascii_map(sim.world, sim.agent))
+
+        def thread_target() -> None:
+            try:
+                sim = Simulation(config)
+                result: SimResult = sim.run()
+                summary: str = self._format_result(result, len(sim.events))
+                map_str: str = render_ascii_map(sim.world, sim.agent)
+                wx.CallAfter(self._update_ui, summary, map_str)
+            except Exception as exc:
+                wx.CallAfter(
+                    wx.MessageBox, f"Simulation failed: {exc}", "Error", wx.OK | wx.ICON_ERROR
+                )
+            finally:
+                wx.CallAfter(self.run_button.Enable)
+
+        threading.Thread(target=thread_target, daemon=True).start()
+
+    def _update_ui(self, summary: str, map_str: str) -> None:
+        self.summary_ctrl.SetValue(summary)
+        self.map_ctrl.SetValue(map_str)
 
     @staticmethod
     def _format_result(result: SimResult, event_count: int) -> str:
