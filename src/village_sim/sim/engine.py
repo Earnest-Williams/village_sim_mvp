@@ -427,13 +427,15 @@ class Simulation:
         return results
 
     def _urgent_goap_goal(self) -> dict[str, FactValue] | None:
-        if self.agent.thirst >= 0.60:
-            return {"thirst_bucket": "low"}
-        if self.agent.hunger >= 0.60:
-            return {"hunger_bucket": "low"}
-        if self.agent.cold_stress >= 0.60:
-            return {"cold_stress_bucket": "low"}
-        return None
+        urgent_needs: tuple[tuple[str, float], ...] = (
+            ("thirst_bucket", self.agent.thirst),
+            ("hunger_bucket", self.agent.hunger),
+            ("cold_stress_bucket", self.agent.cold_stress),
+        )
+        goal_name, goal_value = max(urgent_needs, key=lambda pair: pair[1])
+        if goal_value < 0.60:
+            return None
+        return {goal_name: "low"}
 
     def _log_agent_death(self) -> None:
         reason: str = "unknown"

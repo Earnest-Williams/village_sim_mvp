@@ -7,14 +7,16 @@ import unittest
 from contextlib import redirect_stdout
 
 from village_sim.agent.needs import update_needs
-from village_sim.agent.perception import perceive
+from village_sim.agent.perception import Observation, perceive
 from village_sim.agent.state import AgentState
 from village_sim.core.config import SimConfig
 from village_sim.core.time import clock_from_tick
 from village_sim.core.types import Position
 from village_sim.orchestrator.snapshotting import make_state_snapshot
+from village_sim.orchestrator.symbolic import extract_symbolic_state
 from village_sim.run import print_result
 from village_sim.sim.engine import Simulation
+from village_sim.world.discoverables import DiscoverableAgentMemory, DiscoverableMemory
 from village_sim.world.discoverables import (
     Discoverable,
     DiscoverableKind,
@@ -40,6 +42,52 @@ def _cave_position(sim: Simulation) -> Position:
 
 
 class TestColdShelter(unittest.TestCase):
+    def test_memory_target_prioritizes_most_critical_need(self) -> None:
+        agent = AgentState(agent_id=1, position=Position(10, 10))
+        agent.thirst = 0.95
+        agent.hunger = 0.20
+        agent.cold_stress = 0.61
+        memory = DiscoverableAgentMemory(
+            discoverables={
+                "spring_001": DiscoverableMemory(
+                    discoverable_id="spring_001",
+                    kind=DiscoverableKind.FRESHWATER_SPRING,
+                    x=10,
+                    y=11,
+                    last_seen_tick=0,
+                    last_known_amount=1.0,
+                    confidence=1.0,
+                ),
+                "berry_001": DiscoverableMemory(
+                    discoverable_id="berry_001",
+                    kind=DiscoverableKind.BERRY_BUSH,
+                    x=20,
+                    y=20,
+                    last_seen_tick=0,
+                    last_known_amount=1.0,
+                    confidence=1.0,
+                ),
+                "cave_001": DiscoverableMemory(
+                    discoverable_id="cave_001",
+                    kind=DiscoverableKind.CAVE,
+                    x=9,
+                    y=10,
+                    last_seen_tick=0,
+                    last_known_amount=1.0,
+                    confidence=1.0,
+                ),
+            }
+        )
+        clock = clock_from_tick(0, SimConfig())
+        symbolic = extract_symbolic_state(
+            agent=agent,
+            observation=Observation(),
+            disc_memory=memory,
+            clock=clock,
+        )
+
+        self.assertEqual(symbolic["target_type"], "freshwater_spring")
+
     def test_agent_state_and_cold_update(self) -> None:
         agent = AgentState(agent_id=1, position=Position(0, 0))
         config = SimConfig()
@@ -145,6 +193,14 @@ class TestColdShelter(unittest.TestCase):
 
         self.assertEqual(result.final_cold_stress, sim.agent.cold_stress)
         self.assertIn("cold_stress=0.42", output.getvalue())
+
+    def test_urgent_goal_chooses_highest_need_above_threshold(self) -> None:
+        sim = _make_discoverable_sim()
+        sim.agent.thirst = 0.61
+        sim.agent.hunger = 0.10
+        sim.agent.cold_stress = 0.95
+
+        self.assertEqual(sim._urgent_goap_goal(), {"cold_stress_bucket": "low"})
 
 
 if __name__ == "__main__":

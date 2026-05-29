@@ -154,8 +154,10 @@ def _choose_memory_target(
         preferred_kinds.extend(
             [DiscoverableKind.BERRY_BUSH, DiscoverableKind.FRESHWATER_SPRING]
         )
-    if agent.cold_stress >= 0.60:
+    if agent.cold_stress >= agent.thirst and agent.cold_stress >= agent.hunger:
         preferred_kinds.insert(0, DiscoverableKind.CAVE)
+    elif agent.cold_stress >= min(agent.thirst, agent.hunger):
+        preferred_kinds.insert(1, DiscoverableKind.CAVE)
     else:
         preferred_kinds.append(DiscoverableKind.CAVE)
 
