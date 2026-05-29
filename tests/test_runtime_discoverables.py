@@ -204,10 +204,11 @@ class TestLiveTrajectoryAndGoapRuntime(unittest.TestCase):
         sim = _make_discoverable_sim()
         sim.agent.position = Position(12, 12)
         sim.agent.thirst = 0.9
+        spring = sim.world.discoverables["spring_001"]
 
         sim.step()
 
-        self.assertEqual(sim.tick, 3)
+        self.assertEqual(sim.tick, spring.interaction_ticks)
 
     def test_step_skips_depleted_discoverable_exploitation(self) -> None:
         sim = _make_discoverable_sim()
