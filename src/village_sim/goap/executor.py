@@ -21,9 +21,12 @@ from village_sim.orchestrator.trajectory import Trajectory, TrajectoryRecorder
 from village_sim.orchestrator.travel import should_record_travel_segment
 from village_sim.world.discoverables import (
     Discoverable,
+    DiscoverableKind,
+    discoverable_at_or_adjacent,
     update_discoverable_memory,
 )
 from village_sim.world.grid import iter_neighbor_positions
+from village_sim.world.weather import WeatherState, make_weather_state
 from village_sim.world.world import World
 
 
@@ -54,6 +57,7 @@ class _SimulationSurface(Protocol):
     orchestrator: Orchestrator
     recorded_trajectories: list[Trajectory]
     rng: random.Random
+    current_weather: WeatherState
 
     def record_discoverable_exploitation(
         self,
@@ -133,7 +137,12 @@ class PlanExecutor:
         start_tick = sim.tick
         start_clock = clock_from_tick(sim.tick, sim.config)
         start_observation = perceive(
-            sim.world, sim.agent.position, start_clock, sim.config
+            sim.world,
+            sim.agent.position,
+            start_clock,
+            sim.config,
+            sim.current_weather,
+            _is_sheltered(sim.world, sim.agent.position),
         )
         update_discoverable_memory(
             sim.discoverable_memory,
@@ -161,7 +170,16 @@ class PlanExecutor:
             if steps_taken > 0:
                 sim.tick += 1
                 clock = clock_from_tick(sim.tick, sim.config)
-                sim.world.step_environment(sim.rng, sim.config, clock.tick_of_day)
+                is_raining = sim.world.step_environment(
+                    sim.rng,
+                    sim.config,
+                    clock.tick_of_day,
+                )
+                sim.current_weather = make_weather_state(
+                    is_raining=is_raining,
+                    is_night=clock.is_night,
+                    config=sim.config,
+                )
             sim.agent.position = next_position
             sim.agent.distance_walked += 1
             sim.agent.current_action = ActionKind.MOVE
@@ -171,7 +189,14 @@ class PlanExecutor:
                 break
 
         end_clock = clock_from_tick(sim.tick, sim.config)
-        end_observation = perceive(sim.world, sim.agent.position, end_clock, sim.config)
+        end_observation = perceive(
+            sim.world,
+            sim.agent.position,
+            end_clock,
+            sim.config,
+            sim.current_weather,
+            _is_sheltered(sim.world, sim.agent.position),
+        )
         update_discoverable_memory(
             sim.discoverable_memory,
             end_observation.discoverables,
@@ -217,7 +242,14 @@ class PlanExecutor:
         start_tick = sim.tick
         before_count = len(sim.recorded_trajectories)
         clock = clock_from_tick(sim.tick, sim.config)
-        observation = perceive(sim.world, sim.agent.position, clock, sim.config)
+        observation = perceive(
+            sim.world,
+            sim.agent.position,
+            clock,
+            sim.config,
+            sim.current_weather,
+            _is_sheltered(sim.world, sim.agent.position),
+        )
         interaction_ticks = sim.record_discoverable_exploitation(clock, observation)
         if interaction_ticks <= 0:
             return ExecutionResult(
@@ -256,7 +288,12 @@ class PlanExecutor:
 
         clock = clock_from_tick(self._sim.tick, self._sim.config)
         observation = perceive(
-            self._sim.world, self._sim.agent.position, clock, self._sim.config
+            self._sim.world,
+            self._sim.agent.position,
+            clock,
+            self._sim.config,
+            self._sim.current_weather,
+            _is_sheltered(self._sim.world, self._sim.agent.position),
         )
         symbolic = make_state_snapshot(
             tick=self._sim.tick,
@@ -292,7 +329,15 @@ class PlanExecutor:
         sim = self._sim
         if self._needs_updated_tick == sim.tick:
             return
-        update_needs(sim.agent, sim.config)
+        clock = clock_from_tick(sim.tick, sim.config)
+        update_needs(
+            sim.agent,
+            sim.config,
+            is_night=clock.is_night,
+            is_raining=sim.current_weather.is_raining,
+            is_sheltered=_is_sheltered(sim.world, sim.agent.position),
+            is_cold_exposed=sim.current_weather.feels_cold,
+        )
         self._needs_updated_tick = sim.tick
 
 
@@ -325,3 +370,8 @@ def _choose_greedy_step(
         )
     )
     return candidates[0]
+
+
+def _is_sheltered(world: World, position: Position) -> bool:
+    item = discoverable_at_or_adjacent(world, position.x, position.y)
+    return item is not None and item.kind is DiscoverableKind.CAVE

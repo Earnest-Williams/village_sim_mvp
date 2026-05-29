@@ -11,7 +11,12 @@ from village_sim.world.discoverables import Discoverable, update_discoverables_d
 from village_sim.world.grid import index_of, iter_neighbor_positions, iter_positions
 from village_sim.world.hydrology import step_hydrology
 from village_sim.world.resources import initialize_food, initialize_water, regrow_food
-from village_sim.world.terrain import classify_terrain, generate_height_map, estimate_slope, walk_cost
+from village_sim.world.terrain import (
+    classify_terrain,
+    generate_height_map,
+    estimate_slope,
+    walk_cost,
+)
 
 
 @dataclass(slots=True)
@@ -77,7 +82,9 @@ class World:
         slope: float = estimate_slope(self.width, self.height, self.height_map, index)
         return walk_cost(self.terrain[index], slope)
 
-    def step_environment(self, rng: random.Random, config: SimConfig, tick_of_day: int = -1) -> bool:
+    def step_environment(
+        self, rng: random.Random, config: SimConfig, tick_of_day: int = -1
+    ) -> bool:
         raining: bool = step_hydrology(
             self.width,
             self.height,
@@ -97,7 +104,9 @@ class World:
             return position
         best_position: Position | None = None
         best_distance: int = 999_999
-        for neighbor in iter_neighbor_positions(self.width, self.height, position, False):
+        for neighbor in iter_neighbor_positions(
+            self.width, self.height, position, False
+        ):
             if self.water_at(neighbor) >= 0.20:
                 distance: int = position.manhattan_to(neighbor)
                 if distance < best_distance:
@@ -110,7 +119,9 @@ class World:
             return position
         best_position: Position | None = None
         best_distance: int = 999_999
-        for neighbor in iter_neighbor_positions(self.width, self.height, position, False):
+        for neighbor in iter_neighbor_positions(
+            self.width, self.height, position, False
+        ):
             if self.food_at(neighbor) >= 0.12:
                 distance: int = position.manhattan_to(neighbor)
                 if distance < best_distance:
@@ -188,7 +199,10 @@ def choose_spawn_position(world: World, rng: random.Random) -> Position:
 
     if not candidates:
         for position in iter_positions(world.width, world.height):
-            if world.is_passable(position) and world.terrain_at(position) is not TerrainKind.WATER:
+            if (
+                world.is_passable(position)
+                and world.terrain_at(position) is not TerrainKind.WATER
+            ):
                 candidates.append(position)
 
     if not candidates:

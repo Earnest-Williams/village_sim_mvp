@@ -8,8 +8,18 @@ from collections import deque
 from village_sim.agent.memory import AgentMemory, ResourceMemory
 from village_sim.agent.state import AgentState
 from village_sim.core.config import SimConfig
-from village_sim.core.types import ActionKind, MoveCandidate, Position, ResourceKind, TerrainKind
-from village_sim.world.grid import index_of, iter_neighbor_positions, iter_positions_in_radius
+from village_sim.core.types import (
+    ActionKind,
+    MoveCandidate,
+    Position,
+    ResourceKind,
+    TerrainKind,
+)
+from village_sim.world.grid import (
+    index_of,
+    iter_neighbor_positions,
+    iter_positions_in_radius,
+)
 from village_sim.world.world import World
 
 
@@ -33,7 +43,9 @@ def execute_drink(
 
     agent.thirst = max(0.0, agent.thirst - consumed * 1.25)
     agent.health = min(1.0, agent.health + 0.004)
-    memory.mark_success(ResourceKind.WATER, drink_position, tick, world.water_at(drink_position))
+    memory.mark_success(
+        ResourceKind.WATER, drink_position, tick, world.water_at(drink_position)
+    )
     return "drank water"
 
 
@@ -57,7 +69,9 @@ def execute_eat(
 
     agent.hunger = max(0.0, agent.hunger - consumed * 0.95)
     agent.health = min(1.0, agent.health + 0.002)
-    memory.mark_success(ResourceKind.FOOD, eat_position, tick, world.food_at(eat_position))
+    memory.mark_success(
+        ResourceKind.FOOD, eat_position, tick, world.food_at(eat_position)
+    )
     return "ate food"
 
 
@@ -135,7 +149,9 @@ def execute_search_near(
     for position in candidates:
         visit_count: int = agent.visited_counts[index_of(world.width, position)]
         distance: int = agent.position.manhattan_to(position)
-        score: float = -float(visit_count) * 0.55 - float(distance) * 0.12 + rng.random() * 0.15
+        score: float = (
+            -float(visit_count) * 0.55 - float(distance) * 0.12 + rng.random() * 0.15
+        )
         if score > best_score:
             best_score = score
             best_position = position
@@ -195,7 +211,9 @@ def _reachable_target(world: World, target: Position) -> Position | None:
     return best
 
 
-def _find_path(world: World, start: Position, target: Position) -> list[Position] | None:
+def _find_path(
+    world: World, start: Position, target: Position
+) -> list[Position] | None:
     """Find an unweighted passable-grid path with bounded breadth-first search."""
 
     frontier: deque[Position] = deque([start])
@@ -247,13 +265,17 @@ def _choose_greedy_step(
     candidates: list[MoveCandidate] = []
     current_distance: float = agent.position.distance_to(target)
     current_height: float = world.height_at(agent.position)
-    for neighbor in iter_neighbor_positions(world.width, world.height, agent.position, False):
+    for neighbor in iter_neighbor_positions(
+        world.width, world.height, agent.position, False
+    ):
         if not world.is_passable(neighbor):
             continue
         distance: float = neighbor.distance_to(target)
         cost: float = world.movement_cost(neighbor)
         height_delta: float = max(0.0, world.height_at(neighbor) - current_height)
-        score: float = (current_distance - distance) * 4.0 - cost * 0.35 - height_delta * 1.6
+        score: float = (
+            (current_distance - distance) * 4.0 - cost * 0.35 - height_delta * 1.6
+        )
         score += rng.random() * 0.03
         candidates.append(MoveCandidate(position=neighbor, score=score))
 
@@ -270,7 +292,9 @@ def choose_exploration_step(
 ) -> Position | None:
     candidates: list[MoveCandidate] = []
     current_height: float = world.height_at(agent.position)
-    for neighbor in iter_neighbor_positions(world.width, world.height, agent.position, False):
+    for neighbor in iter_neighbor_positions(
+        world.width, world.height, agent.position, False
+    ):
         if not world.is_passable(neighbor):
             continue
         index: int = index_of(world.width, neighbor)
@@ -283,7 +307,11 @@ def choose_exploration_step(
             terrain_bonus += 0.28
         if kind is TerrainKind.WATER:
             terrain_bonus += 0.18
-        score: float = terrain_bonus - float(visit_count) * 0.30 - world.movement_cost(neighbor) * 0.08
+        score: float = (
+            terrain_bonus
+            - float(visit_count) * 0.30
+            - world.movement_cost(neighbor) * 0.08
+        )
         score += rng.random() * 0.20
         candidates.append(MoveCandidate(position=neighbor, score=score))
 

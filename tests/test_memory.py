@@ -21,10 +21,16 @@ class MemoryTests(unittest.TestCase):
     def test_best_memory_prefers_confident_nearby_resource(self) -> None:
         memory = AgentMemory()
         config = SimConfig()
-        memory.observe(ResourceSighting(Position(2, 3), ResourceKind.WATER, 1.0), tick=1)
-        memory.observe(ResourceSighting(Position(50, 50), ResourceKind.WATER, 1.0), tick=1)
+        memory.observe(
+            ResourceSighting(Position(2, 3), ResourceKind.WATER, 1.0), tick=1
+        )
+        memory.observe(
+            ResourceSighting(Position(50, 50), ResourceKind.WATER, 1.0), tick=1
+        )
 
-        best = memory.best_memory(ResourceKind.WATER, Position(0, 0), tick=2, config=config)
+        best = memory.best_memory(
+            ResourceKind.WATER, Position(0, 0), tick=2, config=config
+        )
 
         self.assertIsNotNone(best)
         assert best is not None

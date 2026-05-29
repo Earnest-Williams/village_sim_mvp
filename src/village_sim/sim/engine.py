@@ -37,6 +37,7 @@ from village_sim.world.discoverables import (
     update_discoverable_memory,
 )
 from village_sim.world.grid import index_of
+from village_sim.world.weather import WeatherState, make_weather_state
 from village_sim.world.world import World, choose_spawn_position, generate_world
 
 
@@ -63,6 +64,9 @@ class Simulation:
     snapshots: list[WorldSnapshot] = field(
         default_factory=lambda: list[WorldSnapshot]()
     )
+    current_weather: WeatherState = field(init=False)
+    _last_feels_cold: bool = field(default=False, init=False)
+    _last_cold_status_bucket: str = field(default="ok", init=False)
 
     def __post_init__(self) -> None:
         self.config.validate()
@@ -82,7 +86,14 @@ class Simulation:
         self.discoverable_memory = DiscoverableAgentMemory()
         self.orchestrator = Orchestrator()
         self.action_library = ActionLibrary()
+        initial_clock: SimClock = clock_from_tick(self.tick, self.config)
+        self.current_weather = make_weather_state(
+            is_raining=False,
+            is_night=initial_clock.is_night,
+            config=self.config,
+        )
         self._log("spawn", "agent spawned")
+        self._log_weather_transition(self.current_weather)
 
     def step(self) -> None:
         if self.tick >= self.config.max_ticks():
@@ -92,11 +103,18 @@ class Simulation:
         raining: bool = self.world.step_environment(
             self.rng, self.config, clock.tick_of_day
         )
+        weather: WeatherState = make_weather_state(
+            is_raining=raining,
+            is_night=clock.is_night,
+            config=self.config,
+        )
+        self.current_weather = weather
         if raining and self.tick % 12 == 0:
             self._log("weather", "rain fell")
+        self._log_weather_transition(weather)
 
         if self.agent.alive:
-            self._step_agent(clock, raining)
+            self._step_agent(clock, weather)
 
         self.tick += 1
 
@@ -150,6 +168,9 @@ class Simulation:
             alive=self.agent.alive,
             goal=self.agent.current_goal.value,
             action=self.agent.current_action.value,
+            feels_cold=self.current_weather.feels_cold,
+            is_sheltered=self._agent_is_sheltered(),
+            cold_status=self._cold_status_bucket(self.agent.cold_stress),
         )
         ascii_map: str | None = (
             render_ascii_map(self.world, self.agent) if include_ascii else None
@@ -159,17 +180,27 @@ class Simulation:
             day=clock.day,
             tick_of_day=clock.tick_of_day,
             is_daylight=clock.is_daylight,
+            is_raining=self.current_weather.is_raining,
+            temperature_c=self.current_weather.temperature_c,
+            feels_cold=self.current_weather.feels_cold,
+            cold_reason=self.current_weather.cold_reason,
             agents=[agent_snapshot],
             ascii_map=ascii_map,
         )
 
-    def _step_agent(self, clock: SimClock, raining: bool) -> None:
+    def _step_agent(self, clock: SimClock, weather: WeatherState) -> None:
         self.agent.ensure_visit_buffer(self.world.width * self.world.height)
         position_index: int = index_of(self.world.width, self.agent.position)
         self.agent.visited_counts[position_index] += 1
 
+        is_sheltered: bool = self._agent_is_sheltered()
         observation: Observation = perceive(
-            self.world, self.agent.position, clock, self.config
+            self.world,
+            self.agent.position,
+            clock,
+            self.config,
+            weather,
+            is_sheltered,
         )
         for sighting in observation.all_sightings():
             is_new: bool = self.memory.observe(sighting, self.tick)
@@ -209,9 +240,11 @@ class Simulation:
                 self.agent,
                 self.config,
                 is_night=clock.is_night,
-                is_raining=raining,
+                is_raining=weather.is_raining,
                 is_sheltered=self._agent_is_sheltered(),
+                is_cold_exposed=weather.feels_cold,
             )
+            self._log_cold_status_transition()
             self._advance_interaction_ticks(interaction_ticks)
             if not self.agent.alive:
                 self._log_agent_death()
@@ -236,9 +269,11 @@ class Simulation:
             self.agent,
             self.config,
             is_night=clock.is_night,
-            is_raining=raining,
+            is_raining=weather.is_raining,
             is_sheltered=self._agent_is_sheltered(),
+            is_cold_exposed=weather.feels_cold,
         )
+        self._log_cold_status_transition()
         if not self.agent.alive:
             self._log_agent_death()
 
@@ -264,14 +299,23 @@ class Simulation:
             discoverable_memory=self.discoverable_memory,
             clock=clock,
         )
+        if item.kind is DiscoverableKind.CAVE:
+            self._log("action", f"seeking shelter at {item.discoverable_id}")
         success: bool = exploit_discoverable(self.agent, item)
         after_tick: int = self.tick + item.interaction_ticks
         after_clock: SimClock = clock_from_tick(after_tick, self.config)
+        after_weather: WeatherState = make_weather_state(
+            is_raining=self.current_weather.is_raining,
+            is_night=after_clock.is_night,
+            config=self.config,
+        )
         after_observation: Observation = perceive(
             self.world,
             self.agent.position,
             after_clock,
             self.config,
+            after_weather,
+            self._agent_is_sheltered(),
         )
         update_discoverable_memory(
             self.discoverable_memory,
@@ -315,6 +359,8 @@ class Simulation:
         for action in self.orchestrator.synthesize_all():
             self.action_library.add(action)
 
+        if item.kind is DiscoverableKind.CAVE:
+            self._log("action", f"sheltered at {item.discoverable_id}")
         self._log("action", f"exploit {item.discoverable_id} {event_name}")
         return item.interaction_ticks
 
@@ -326,18 +372,55 @@ class Simulation:
             raining: bool = self.world.step_environment(
                 self.rng, self.config, busy_clock.tick_of_day
             )
+            weather: WeatherState = make_weather_state(
+                is_raining=raining,
+                is_night=busy_clock.is_night,
+                config=self.config,
+            )
+            self.current_weather = weather
             if raining and self.tick % 12 == 0:
                 self._log("weather", "rain fell")
+            self._log_weather_transition(weather)
             update_needs(
                 self.agent,
                 self.config,
                 is_night=busy_clock.is_night,
-                is_raining=raining,
+                is_raining=weather.is_raining,
                 is_sheltered=self._agent_is_sheltered(),
+                is_cold_exposed=weather.feels_cold,
             )
+            self._log_cold_status_transition()
             extra_ticks -= 1
             if not self.agent.alive:
                 return
+
+    def _log_weather_transition(self, weather: WeatherState) -> None:
+        if weather.feels_cold and not self._last_feels_cold:
+            if weather.cold_reason == "night":
+                self._log("weather", "cold night")
+            elif weather.cold_reason == "rain":
+                self._log("weather", "cold rain")
+            elif weather.cold_reason == "night_rain":
+                self._log("weather", "cold night rain")
+        self._last_feels_cold = weather.feels_cold
+
+    def _log_cold_status_transition(self) -> None:
+        bucket: str = self._cold_status_bucket(self.agent.cold_stress)
+        if bucket == self._last_cold_status_bucket:
+            return
+        if bucket == "cold":
+            self._log("status", "agent is cold")
+        elif bucket == "severe":
+            self._log("status", "agent is severely cold")
+        self._last_cold_status_bucket = bucket
+
+    @staticmethod
+    def _cold_status_bucket(cold_stress: float) -> str:
+        if cold_stress >= 0.60:
+            return "severe"
+        if cold_stress >= 0.30:
+            return "cold"
+        return "ok"
 
     def record_discoverable_exploitation(
         self,
@@ -378,6 +461,8 @@ class Simulation:
             self.agent.position,
             clock,
             self.config,
+            self.current_weather,
+            self._agent_is_sheltered(),
         )
         symbolic = extract_symbolic_state(
             self.agent,

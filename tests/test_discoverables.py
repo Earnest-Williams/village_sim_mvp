@@ -20,13 +20,17 @@ from village_sim.world.discoverables import (
 class TestDiscoverablePerception(unittest.TestCase):
     def test_agent_perceives_nearby_spring(self) -> None:
         world = make_discoverable_test_world()
-        observations = perceive_discoverables(world, agent_x=10, agent_y=12, vision_radius=4)
+        observations = perceive_discoverables(
+            world, agent_x=10, agent_y=12, vision_radius=4
+        )
         ids = {obs.discoverable_id for obs in observations}
         self.assertIn("spring_001", ids)
 
     def test_agent_does_not_perceive_distant_spring(self) -> None:
         world = make_discoverable_test_world()
-        observations = perceive_discoverables(world, agent_x=0, agent_y=0, vision_radius=3)
+        observations = perceive_discoverables(
+            world, agent_x=0, agent_y=0, vision_radius=3
+        )
         ids = {obs.discoverable_id for obs in observations}
         self.assertNotIn("spring_001", ids)
 

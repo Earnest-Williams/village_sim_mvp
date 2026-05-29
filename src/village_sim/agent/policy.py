@@ -21,7 +21,9 @@ from village_sim.core.types import GoalKind, Position, ResourceKind, ResourceSig
 from village_sim.world.world import World
 
 
-def choose_goal(agent: AgentState, observation: Observation, clock: SimClock) -> GoalKind:
+def choose_goal(
+    agent: AgentState, observation: Observation, clock: SimClock
+) -> GoalKind:
     """Pick a high-level goal from current needs and time of day."""
 
     del observation
@@ -51,9 +53,13 @@ def choose_and_execute_action(
     agent.current_goal = choose_goal(agent, observation, clock)
 
     if agent.current_goal is GoalKind.GET_WATER:
-        return _resolve_water_goal(agent, memory, observation, world, clock.tick, rng, config)
+        return _resolve_water_goal(
+            agent, memory, observation, world, clock.tick, rng, config
+        )
     if agent.current_goal is GoalKind.GET_FOOD:
-        return _resolve_food_goal(agent, memory, observation, world, clock.tick, rng, config)
+        return _resolve_food_goal(
+            agent, memory, observation, world, clock.tick, rng, config
+        )
     if agent.current_goal is GoalKind.SLEEP:
         return execute_sleep(agent)
     if agent.current_goal is GoalKind.EXPLORE:
@@ -129,7 +135,9 @@ def _resolve_food_goal(
         if agent.position.manhattan_to(remembered.position) <= 1:
             memory.mark_failure(ResourceKind.FOOD, remembered.position, tick)
             return execute_search_near(agent, world, remembered, rng)
-        if agent.position.manhattan_to(remembered.position) <= max(2, remembered.search_radius):
+        if agent.position.manhattan_to(remembered.position) <= max(
+            2, remembered.search_radius
+        ):
             return execute_search_near(agent, world, remembered, rng)
         return execute_move_toward(agent, world, remembered.position, rng)
 

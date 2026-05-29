@@ -14,6 +14,7 @@ def update_needs(
     is_night: bool = False,
     is_raining: bool = False,
     is_sheltered: bool = False,
+    is_cold_exposed: bool | None = None,
 ) -> None:
     """Advance biological needs by one tick."""
 
@@ -29,15 +30,19 @@ def update_needs(
         agent.fatigue += config.fatigue_gain_awake
         agent.awake_ticks += 1
 
+    cold_exposed: bool = is_night or is_raining
+    if is_cold_exposed is not None:
+        cold_exposed = is_cold_exposed
+
     if is_sheltered:
         agent.cold_stress -= config.cold_recovery_shelter
-    else:
-        if is_night:
+    elif cold_exposed:
+        if is_night or not is_raining:
             agent.cold_stress += config.cold_gain_night
         if is_raining:
             agent.cold_stress += config.cold_gain_rain
-        if not is_night and not is_raining:
-            agent.cold_stress -= config.cold_recovery_daylight
+    else:
+        agent.cold_stress -= config.cold_recovery_daylight
 
     agent.clamp_needs()
 

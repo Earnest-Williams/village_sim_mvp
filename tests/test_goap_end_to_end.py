@@ -214,7 +214,9 @@ class TestGoapEndToEnd(unittest.TestCase):
 
         sim.step()
 
-        self.assertEqual(sim.agent.awake_ticks - start_awake_ticks, sim.tick - start_tick)
+        self.assertEqual(
+            sim.agent.awake_ticks - start_awake_ticks, sim.tick - start_tick
+        )
 
     def test_action_library_round_trips_travel_payloads(self) -> None:
         sim = _make_sim()

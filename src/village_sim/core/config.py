@@ -35,6 +35,11 @@ class SimConfig:
     cold_health_threshold: float = 0.96
     cold_health_damage: float = 0.015
 
+    day_temperature_c: float = 18.0
+    night_temperature_c: float = 7.0
+    rain_temperature_penalty_c: float = 3.0
+    cold_temperature_threshold_c: float = 10.0
+
     drink_amount_per_tick: float = 0.24
     eat_amount_per_tick: float = 0.22
 

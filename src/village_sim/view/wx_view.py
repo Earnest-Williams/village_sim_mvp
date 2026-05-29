@@ -246,6 +246,12 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
             len(sim.snapshots),
             options.action_library_out,
             options.replay,
+            sim.current_weather.temperature_c,
+            sim.current_weather.feels_cold,
+            sim._agent_is_sheltered(),
+            self._count_matching_events(sim, "weather", "cold"),
+            self._count_matching_events(sim, "status", "cold"),
+            self._count_matching_events(sim, "action", "shelter"),
         )
         map_str: str = ""
         if options.print_map:
@@ -299,6 +305,16 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
         return "\n".join(lines)
 
     @staticmethod
+    def _count_matching_events(
+        sim: Simulation, kind: str, message_fragment: str
+    ) -> int:
+        return sum(
+            1
+            for event in sim.events
+            if event.kind == kind and message_fragment in event.message
+        )
+
+    @staticmethod
     def _render_map(sim: Simulation, local_map_radius: int) -> str:
         radius: int | None = None
         if local_map_radius > 0:
@@ -343,6 +359,12 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
         snapshot_count: int,
         action_library_out: Path | None,
         replay: Path | None,
+        final_temperature_c: float,
+        final_feels_cold: bool,
+        final_is_sheltered: bool,
+        cold_weather_events: int,
+        cold_status_events: int,
+        shelter_events: int,
     ) -> str:
         lines: list[str] = [
             f"Seed: {result.seed}",
@@ -362,6 +384,17 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
                 f"remembered_food={result.remembered_food_sites}"
             ),
             f"Distance walked: {result.distance_walked}",
+            (
+                "Final weather/cold: "
+                f"temp_c={final_temperature_c:.1f} "
+                f"feels_cold={final_feels_cold} "
+                f"sheltered={final_is_sheltered}"
+            ),
+            (
+                "Cold events: "
+                f"weather={cold_weather_events} status={cold_status_events} "
+                f"shelter={shelter_events}"
+            ),
             f"Events logged: {event_count}",
             f"Snapshots stored: {snapshot_count}",
         ]

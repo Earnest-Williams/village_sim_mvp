@@ -35,7 +35,9 @@ def generate_height_map(width: int, height: int, rng: random.Random) -> list[flo
     return [(value - min_value) / spread for value in values]
 
 
-def estimate_slope(width: int, height: int, height_map: list[float], index: int) -> float:
+def estimate_slope(
+    width: int, height: int, height_map: list[float], index: int
+) -> float:
     position = divmod(index, width)
     y: int = position[0]
     x: int = position[1]
