@@ -6,6 +6,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import wx  # type: ignore[import-not-found]
 import wx.stc as wxstc  # type: ignore[import-not-found]
@@ -21,69 +22,46 @@ from village_sim.view.ascii_view import (
     render_ascii_map,
     render_map_model,
 )
+from village_sim.view.stc_map import (
+    GUI_DEFAULT_WORLD_SIZE,
+    MAP_BACKGROUND,
+    MAP_DEFAULT_FONT_POINT_SIZE,
+    MAP_DEFAULT_FOREGROUND,
+    MAP_STATUS_FOREGROUND,
+    STC_ROLE_STYLE,
+    build_stc_content,
+)
 
 MAP_UPDATE_INTERVAL_SECONDS: float = 0.05
 
-# Maps each semantic glyph role to an STC style number (1–13).
-# Style 0 is left as the STC default (used for newlines and unknown roles).
-_STC_ROLE_STYLE: dict[str, int] = {
-    "summary": 1,
-    "agent": 2,
-    "agent_sleeping": 3,
-    "water": 4,
-    "broadleaf": 5,
-    "evergreen": 6,
-    "grass": 7,
-    "brush": 8,
-    "wetland": 9,
-    "food": 10,
-    "rock": 11,
-    "cave": 12,
-    "hill": 13,
-}
+
+def _build_stc_content(
+    rendered_map: RenderedMap, *, left_padding_columns: int = 0
+) -> tuple[str, list[tuple[int, int]]]:
+    """Backward-compatible wrapper for STC content tests and callers."""
+    return build_stc_content(rendered_map, left_padding_columns=left_padding_columns)
 
 
-def _build_stc_content(rendered_map: RenderedMap) -> tuple[str, list[tuple[int, int]]]:
-    """Return ``(full_text, style_runs)`` for STC rendering.
-
-    *style_runs* is a list of ``(utf8_byte_count, style_number)`` pairs
-    describing consecutive same-style segments.  Callers apply them with a
-    single ``StartStyling(0)`` followed by one ``SetStyling`` per run — the
-    most efficient path through the STC API because:
-
-    * all text is a single string (one ``SetText`` call), and
-    * consecutive same-role glyphs are merged, minimising style-change ops.
-
-    Multi-byte Unicode characters (e.g. ♣ U+2663 = 3 UTF-8 bytes) are
-    accounted for correctly: every byte in a glyph is assigned the same style.
-    """
-    text_parts: list[str] = []
-    style_runs: list[tuple[int, int]] = []
-    current_style: int = -1
-    current_bytes: int = 0
-
-    def _append(text: str, style: int) -> None:
-        nonlocal current_style, current_bytes
-        text_parts.append(text)
-        byte_len = len(text.encode("utf-8"))
-        if style == current_style:
-            current_bytes += byte_len
-        else:
-            if current_bytes > 0:
-                style_runs.append((current_bytes, current_style))
-            current_style = style
-            current_bytes = byte_len
-
-    summary_style = _STC_ROLE_STYLE["summary"]
-    _append(rendered_map.status + "\n", summary_style)
-    _append(rendered_map.legend + "\n", summary_style)
-    for row in rendered_map.rows:
-        for glyph in row:
-            _append(glyph.char, _STC_ROLE_STYLE.get(glyph.role, 0))
-        _append("\n", 0)
-    if current_bytes > 0:
-        style_runs.append((current_bytes, current_style))
-    return "".join(text_parts), style_runs
+def _make_map_font(point_size: int = MAP_DEFAULT_FONT_POINT_SIZE) -> wx.Font:
+    """Create a compact monospace map font with safe platform fallbacks."""
+    preferred_faces: list[str] = [
+        "Cascadia Mono",
+        "Cascadia Code",
+        "JetBrains Mono",
+        "DejaVu Sans Mono",
+        "Noto Sans Mono",
+        "Liberation Mono",
+        "Monospace",
+    ]
+    for face_name in preferred_faces:
+        if not wx.FontEnumerator.IsValidFacename(face_name):
+            continue
+        font = wx.Font(
+            wx.FontInfo(point_size).Family(wx.FONTFAMILY_TELETYPE).FaceName(face_name)
+        )
+        if font.IsOk():
+            return font
+    return wx.Font(wx.FontInfo(point_size).Family(wx.FONTFAMILY_TELETYPE))
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,18 +86,25 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
         panel = wx.Panel(self)
         root_sizer = wx.BoxSizer(wx.VERTICAL)
 
-        controls_sizer = wx.FlexGridSizer(rows=9, cols=4, vgap=8, hgap=8)
+        controls_sizer = wx.FlexGridSizer(rows=10, cols=4, vgap=8, hgap=8)
         controls_sizer.AddGrowableCol(1, 1)
         controls_sizer.AddGrowableCol(3, 1)
 
         self.seed_ctrl = wx.SpinCtrl(panel, min=1, max=1_000_000, initial=1)
         self.days_ctrl = wx.SpinCtrl(panel, min=1, max=365, initial=10)
-        self.width_ctrl = wx.SpinCtrl(panel, min=8, max=256, initial=32)
-        self.height_ctrl = wx.SpinCtrl(panel, min=8, max=256, initial=32)
+        self.width_ctrl = wx.SpinCtrl(
+            panel, min=8, max=256, initial=GUI_DEFAULT_WORLD_SIZE
+        )
+        self.height_ctrl = wx.SpinCtrl(
+            panel, min=8, max=256, initial=GUI_DEFAULT_WORLD_SIZE
+        )
         self.batch_ctrl = wx.SpinCtrl(panel, min=1, max=10_000, initial=1)
         self.local_map_radius_ctrl = wx.SpinCtrl(panel, min=0, max=512, initial=0)
         self.snapshot_every_ctrl = wx.SpinCtrl(panel, min=0, max=1_000_000, initial=0)
         self.speed_ctrl = wx.SpinCtrl(panel, min=0, max=1000, initial=25)
+        self.map_font_size_ctrl = wx.SpinCtrl(
+            panel, min=6, max=24, initial=MAP_DEFAULT_FONT_POINT_SIZE
+        )
         self.print_map_ctrl = wx.CheckBox(panel, label="Render final ASCII map")
         self.print_map_ctrl.SetValue(True)
         self.discoverables_ctrl = wx.CheckBox(
@@ -155,6 +140,12 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
             "Tick delay (ms)",
             self.speed_ctrl,
         )
+        self._add_labeled_control(
+            controls_sizer,
+            panel,
+            "Map font size",
+            self.map_font_size_ctrl,
+        )
         controls_sizer.Add(self.print_map_ctrl, 0, wx.ALIGN_CENTER_VERTICAL)
         controls_sizer.Add(self.discoverables_ctrl, 0, wx.ALIGN_CENTER_VERTICAL)
         controls_sizer.Add(self.goap_ctrl, 0, wx.ALIGN_CENTER_VERTICAL)
@@ -186,24 +177,10 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
         )
         self.summary_ctrl.SetBackgroundColour(panel.GetBackgroundColour())
         self.map_ctrl = wxstc.StyledTextCtrl(panel, style=wx.BORDER_NONE)
-        self.map_ctrl.SetReadOnly(True)
-        self.map_ctrl.SetWrapMode(wxstc.STC_WRAP_NONE)
-        self.map_ctrl.SetScrollWidthTracking(True)
-        self.map_ctrl.SetScrollWidth(1)
-        self.map_ctrl.SetUndoCollection(False)
-        # Hide the blinking caret — this is a display-only control.
-        self.map_ctrl.SetCaretWidth(0)
-        # Remove all editor margins (line numbers, fold marks, etc.).
-        for _margin in range(5):
-            self.map_ctrl.SetMarginWidth(_margin, 0)
-        # Set monospace font on the default style then propagate to all styles.
-        _mono_font = wx.Font(wx.FontInfo(10).Family(wx.FONTFAMILY_TELETYPE))
-        self.map_ctrl.StyleSetFont(wxstc.STC_STYLE_DEFAULT, _mono_font)
-        self.map_ctrl.StyleClearAll()
-        # Assign the role foreground colors.
-        for _role, _style_num in _STC_ROLE_STYLE.items():
-            _color = wx.Colour(ROLE_COLORS.get(_role, "#d0d0d0"))
-            self.map_ctrl.StyleSetForeground(_style_num, _color)
+        self._last_rendered_map: RenderedMap | None = None
+        self._configure_map_ctrl()
+        self.map_font_size_ctrl.Bind(wx.EVT_SPINCTRL, self.on_map_font_size_changed)
+        self.map_font_size_ctrl.Bind(wx.EVT_TEXT, self.on_map_font_size_changed)
 
         root_sizer.Add(controls_sizer, 0, wx.EXPAND | wx.ALL, 12)
         root_sizer.Add(self.run_button, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
@@ -232,6 +209,110 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
             wx.ALIGN_CENTER_VERTICAL,
         )
         controls_sizer.Add(control, 1, wx.EXPAND)
+
+    def _configure_map_ctrl(self) -> None:
+        map_bg = wx.Colour(MAP_BACKGROUND)
+        default_fg = wx.Colour(MAP_DEFAULT_FOREGROUND)
+        summary_fg = wx.Colour(MAP_STATUS_FOREGROUND)
+        map_font = _make_map_font(self.map_font_size_ctrl.GetValue())
+
+        self.map_ctrl.SetReadOnly(True)
+        self.map_ctrl.SetWrapMode(wxstc.STC_WRAP_NONE)
+        self.map_ctrl.SetEdgeMode(wxstc.STC_EDGE_NONE)
+        self.map_ctrl.SetViewEOL(False)
+        self.map_ctrl.SetViewWhiteSpace(False)
+        self.map_ctrl.SetIndentationGuides(False)
+        self.map_ctrl.SetUseHorizontalScrollBar(True)
+        self.map_ctrl.SetUseVerticalScrollBar(True)
+        self.map_ctrl.SetScrollWidthTracking(False)
+        self.map_ctrl.SetUndoCollection(False)
+        self.map_ctrl.SetCaretWidth(0)
+        self.map_ctrl.SetCaretLineVisible(False)
+        self.map_ctrl.SetZoom(0)
+        self.map_ctrl.SetBackgroundColour(map_bg)
+        margins_background_method: Any = getattr(
+            self.map_ctrl, "SetMarginsBackground", None
+        )
+        if callable(margins_background_method):
+            margins_background_method(map_bg)
+        fold_margin_colour_method: Any = getattr(
+            self.map_ctrl, "SetFoldMarginColour", None
+        )
+        if callable(fold_margin_colour_method):
+            fold_margin_colour_method(True, map_bg)
+        fold_margin_highlight_method: Any = getattr(
+            self.map_ctrl, "SetFoldMarginHiColour", None
+        )
+        if callable(fold_margin_highlight_method):
+            fold_margin_highlight_method(True, map_bg)
+        self._hide_map_margins()
+
+        self.map_ctrl.StyleSetFont(wxstc.STC_STYLE_DEFAULT, map_font)
+        self.map_ctrl.StyleSetSize(
+            wxstc.STC_STYLE_DEFAULT, self.map_font_size_ctrl.GetValue()
+        )
+        self.map_ctrl.StyleSetBackground(wxstc.STC_STYLE_DEFAULT, map_bg)
+        self.map_ctrl.StyleSetForeground(wxstc.STC_STYLE_DEFAULT, default_fg)
+        self.map_ctrl.StyleClearAll()
+        self.map_ctrl.StyleSetFont(0, map_font)
+        self.map_ctrl.StyleSetSize(0, self.map_font_size_ctrl.GetValue())
+        self.map_ctrl.StyleSetBackground(0, map_bg)
+        self.map_ctrl.StyleSetForeground(0, default_fg)
+        self.map_ctrl.StyleSetBackground(wxstc.STC_STYLE_LINENUMBER, map_bg)
+        self.map_ctrl.StyleSetForeground(wxstc.STC_STYLE_LINENUMBER, default_fg)
+        for role, style_num in STC_ROLE_STYLE.items():
+            role_fg = summary_fg
+            if role != "summary":
+                role_fg = wx.Colour(ROLE_COLORS.get(role, MAP_DEFAULT_FOREGROUND))
+            self.map_ctrl.StyleSetFont(style_num, map_font)
+            self.map_ctrl.StyleSetSize(style_num, self.map_font_size_ctrl.GetValue())
+            self.map_ctrl.StyleSetForeground(style_num, role_fg)
+            self.map_ctrl.StyleSetBackground(style_num, map_bg)
+
+    def _hide_map_margins(self) -> None:
+        margin_count_method: Any = getattr(self.map_ctrl, "GetMargins", None)
+        raw_margin_count: Any = None
+        if callable(margin_count_method):
+            raw_margin_count = margin_count_method()
+        margin_count = 5
+        if isinstance(raw_margin_count, int) and raw_margin_count > 0:
+            margin_count = raw_margin_count
+        for margin in range(margin_count):
+            self.map_ctrl.SetMarginWidth(margin, 0)
+            self.map_ctrl.SetMarginSensitive(margin, False)
+
+    def on_map_font_size_changed(self, _: wx.CommandEvent) -> None:
+        self._configure_map_ctrl()
+        if self._last_rendered_map is not None:
+            self._set_colored_map_value(self._last_rendered_map)
+
+    def _visible_map_columns(self) -> int:
+        raw_char_width, _raw_char_height = self.map_ctrl.GetTextExtent("M")
+        if not isinstance(raw_char_width, int) or raw_char_width <= 0:
+            return 0
+        raw_client_width: Any = self.map_ctrl.GetClientSize().width
+        if not isinstance(raw_client_width, int) or raw_client_width <= 0:
+            return 0
+        return max(0, raw_client_width // raw_char_width)
+
+    def _center_padding_columns(self, rendered_map: RenderedMap) -> int:
+        visible_cols = self._visible_map_columns()
+        map_cols = max((len(row) for row in rendered_map.rows), default=0)
+        if visible_cols <= map_cols:
+            return 0
+        return (visible_cols - map_cols) // 2
+
+    def _update_map_scroll_width(self, full_text: str) -> None:
+        raw_char_width, _raw_char_height = self.map_ctrl.GetTextExtent("M")
+        if not isinstance(raw_char_width, int) or raw_char_width <= 0:
+            return
+        raw_client_width: Any = self.map_ctrl.GetClientSize().width
+        client_width = 0
+        if isinstance(raw_client_width, int) and raw_client_width > 0:
+            client_width = raw_client_width
+        max_columns = max((len(line) for line in full_text.splitlines()), default=0)
+        scroll_width = max(client_width, (max_columns + 1) * raw_char_width)
+        self.map_ctrl.SetScrollWidth(scroll_width)
 
     def on_run(self, _: wx.CommandEvent) -> None:
         self.run_button.Disable()
@@ -425,11 +506,16 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
             return
 
     def _set_colored_map_value(self, rendered_map: RenderedMap) -> None:
-        full_text, style_runs = _build_stc_content(rendered_map)
+        self._last_rendered_map = rendered_map
+        left_padding_columns = self._center_padding_columns(rendered_map)
+        full_text, style_runs = _build_stc_content(
+            rendered_map, left_padding_columns=left_padding_columns
+        )
         first_line: int = self.map_ctrl.GetFirstVisibleLine()
         x_offset: int = self.map_ctrl.GetXOffset()
         self.map_ctrl.SetReadOnly(False)
         self.map_ctrl.SetText(full_text)
+        self._update_map_scroll_width(full_text)
         self.map_ctrl.StartStyling(0)
         for byte_len, style_num in style_runs:
             self.map_ctrl.SetStyling(byte_len, style_num)
@@ -438,6 +524,7 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
         self.map_ctrl.SetReadOnly(True)
 
     def _set_map_text_preserving_view(self, map_str: str) -> None:
+        self._last_rendered_map = None
         first_line: int = self.map_ctrl.GetFirstVisibleLine()
         x_offset: int = self.map_ctrl.GetXOffset()
         self.map_ctrl.SetReadOnly(False)
@@ -447,6 +534,7 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
         self.map_ctrl.SetReadOnly(True)
 
     def _clear_map_ctrl(self) -> None:
+        self._last_rendered_map = None
         self.map_ctrl.SetReadOnly(False)
         self.map_ctrl.ClearAll()
         self.map_ctrl.SetReadOnly(True)
