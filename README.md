@@ -108,3 +108,25 @@ A successful MVP run is not guaranteed survival for every seed. Terrain can gene
 ## Code style
 
 The code is intentionally explicit and data-oriented. It avoids engine object graphs, hidden global RNG calls, and renderer-owned simulation state.
+
+## Discoverables and synthesized actions
+
+The live simulation can optionally seed two canonical discoverables with
+`--discoverables`:
+
+```bash
+PYTHONPATH=src python -m village_sim --seed 1 --days 2 --width 32 --height 32 --discoverables --print-map
+```
+
+- `spring_001` is a freshwater spring at `(12, 12)`. Exploiting it reduces
+  thirst and does not deplete the spring.
+- `berry_bush_001` is a berry bush at `(20, 18)`. Exploiting it reduces hunger
+  and consumes one unit from the bush until daily regrowth replenishes it.
+- Discoverable sightings are stored in a separate ID-indexed discoverable memory.
+- Successful or failed discoverable exploitation is recorded as a trajectory and
+  fed to the orchestrator. General movement trajectories are not recorded yet.
+- Repeated successful trajectories can synthesize in-memory instance and template
+  actions for the flat GOAP selector. The current GOAP planner is a flat
+  applicable-action selector, not a full tree search.
+- Synthesized actions still carry payload IDs for future policy execution. Full
+  RL policy execution is not implemented in the runtime loop yet.
