@@ -6,13 +6,11 @@ import threading
 
 try:
     import wx
-except ImportError:
-    import sys
-
-    sys.exit(
+except ImportError as exc:
+    raise SystemExit(
         "wxPython is required to run the GUI. "
         'Please install it with: pip install "village-sim-mvp[gui]"'
-    )
+    ) from exc
 
 from village_sim.core.config import SimConfig
 from village_sim.sim.engine import Simulation
@@ -84,9 +82,12 @@ class VillageSimFrame(wx.Frame):
                 summary: str = self._format_result(result, len(sim.events))
                 map_str: str = render_ascii_map(sim.world, sim.agent)
                 wx.CallAfter(self._update_ui, summary, map_str)
-            except Exception as exc:
+            except Exception:
                 wx.CallAfter(
-                    wx.MessageBox, f"Simulation failed: {exc}", "Error", wx.OK | wx.ICON_ERROR
+                    wx.MessageBox,
+                    "Simulation failed. Please check your inputs and try again.",
+                    "Error",
+                    wx.OK | wx.ICON_ERROR,
                 )
             finally:
                 wx.CallAfter(self.run_button.Enable)

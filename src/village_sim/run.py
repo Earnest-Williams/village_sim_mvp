@@ -140,7 +140,7 @@ def launch_wx_interface() -> None:
     try:
         from village_sim.view.wx_view import main as wx_main
     except ImportError as exc:
-        if exc.name == "wx":
+        if getattr(exc, "name", None) == "wx":
             raise SystemExit(
                 'wxPython is required for --wx. Install it with: python -m pip install "village-sim-mvp[gui]"'
             ) from exc
