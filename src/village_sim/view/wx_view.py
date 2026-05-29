@@ -18,6 +18,8 @@ from village_sim.sim.engine import Simulation
 from village_sim.sim.metrics import SimResult
 from village_sim.view.ascii_view import render_ascii_map
 
+MAP_UPDATE_INTERVAL_SECONDS: float = 0.05
+
 
 class VillageSimFrame(wx.Frame):
     def __init__(self) -> None:
@@ -90,11 +92,15 @@ class VillageSimFrame(wx.Frame):
             try:
                 sim = Simulation(config)
                 max_ticks: int = config.max_ticks()
+                last_map_update_time: float = time.monotonic() - MAP_UPDATE_INTERVAL_SECONDS
                 while sim.tick < max_ticks and sim.agent.alive:
                     sim.step()
                     if update_every_tick:
-                        map_str: str = render_ascii_map(sim.world, sim.agent)
-                        wx.CallAfter(self.map_ctrl.SetValue, map_str)
+                        now: float = time.monotonic()
+                        if now - last_map_update_time >= MAP_UPDATE_INTERVAL_SECONDS:
+                            map_str: str = render_ascii_map(sim.world, sim.agent)
+                            wx.CallAfter(self._set_map_value, map_str)
+                            last_map_update_time = now
                     if tick_delay_seconds > 0.0:
                         time.sleep(tick_delay_seconds)
                 result: SimResult = sim.result()
@@ -109,13 +115,40 @@ class VillageSimFrame(wx.Frame):
                     wx.OK | wx.ICON_ERROR,
                 )
             finally:
-                wx.CallAfter(self.run_button.Enable)
+                wx.CallAfter(self._enable_run_button)
 
         threading.Thread(target=thread_target, daemon=True).start()
 
     def _update_ui(self, summary: str, map_str: str) -> None:
-        self.summary_ctrl.SetValue(summary)
-        self.map_ctrl.SetValue(map_str)
+        if not self._frame_is_alive():
+            return
+        try:
+            self.summary_ctrl.SetValue(summary)
+            self.map_ctrl.SetValue(map_str)
+        except wx.PyDeadObjectError:
+            return
+
+    def _set_map_value(self, map_str: str) -> None:
+        if not self._frame_is_alive():
+            return
+        try:
+            self.map_ctrl.SetValue(map_str)
+        except wx.PyDeadObjectError:
+            return
+
+    def _enable_run_button(self) -> None:
+        if not self._frame_is_alive():
+            return
+        try:
+            self.run_button.Enable()
+        except wx.PyDeadObjectError:
+            return
+
+    def _frame_is_alive(self) -> bool:
+        try:
+            return not self.IsBeingDeleted()
+        except wx.PyDeadObjectError:
+            return False
 
     @staticmethod
     def _format_result(result: SimResult, event_count: int) -> str:
