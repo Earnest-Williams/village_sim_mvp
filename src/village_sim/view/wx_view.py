@@ -8,13 +8,21 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import wx  # type: ignore[import-not-found]
+import wx.richtext as wxrichtext  # type: ignore[import-not-found]
 
 from village_sim.core.config import SimConfig
 from village_sim.orchestrator.action_model import ActionLibrary
 from village_sim.sim.engine import Simulation
 from village_sim.sim.metrics import SimResult
 from village_sim.sim.replay import write_run_report
-from village_sim.view.ascii_view import render_ascii_map
+from village_sim.view.ascii_view import (
+    ROLE_COLORS,
+    RenderedMap,
+    render_ascii_map,
+    render_map_model,
+    rendered_map_to_text,
+)
+from village_sim.view.scroll import TextViewState, clamp_insertion_point
 
 MAP_UPDATE_INTERVAL_SECONDS: float = 0.05
 
@@ -118,8 +126,9 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
             size=(-1, 150),
         )
         self.summary_ctrl.SetBackgroundColour(panel.GetBackgroundColour())
-        self.map_ctrl = wx.TextCtrl(
-            panel, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.HSCROLL | wx.TE_DONTWRAP
+        self.map_ctrl = wxrichtext.RichTextCtrl(
+            panel,
+            style=wx.TE_MULTILINE | wx.TE_READONLY | wx.HSCROLL | wx.TE_DONTWRAP,
         )
         self.map_ctrl.SetFont(wx.Font(wx.FontInfo(10).Family(wx.FONTFAMILY_TELETYPE)))
 
@@ -131,9 +140,7 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
         root_sizer.Add(
             self.summary_ctrl, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12
         )
-        root_sizer.Add(
-            wx.StaticText(panel, label="ASCII Map"), 0, wx.LEFT | wx.RIGHT, 12
-        )
+        root_sizer.Add(wx.StaticText(panel, label="Map"), 0, wx.LEFT | wx.RIGHT, 12)
         root_sizer.Add(self.map_ctrl, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
 
         panel.SetSizer(root_sizer)
@@ -163,10 +170,10 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
             try:
                 if options.batch > 1:
                     summary = self._run_batch(options)
-                    wx.CallAfter(self._update_ui, summary, "")
+                    wx.CallAfter(self._update_ui, summary, None)
                     return
-                summary, map_str = self._run_single(options)
-                wx.CallAfter(self._update_ui, summary, map_str)
+                summary, rendered_map = self._run_single(options)
+                wx.CallAfter(self._update_ui, summary, rendered_map)
             except Exception as error:
                 message: str = f"Simulation failed: {error}"
                 wx.CallAfter(
@@ -209,7 +216,7 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
             return None
         return Path(raw_path)
 
-    def _run_single(self, options: GuiRunOptions) -> tuple[str, str]:
+    def _run_single(self, options: GuiRunOptions) -> tuple[str, RenderedMap | None]:
         sim = Simulation(options.config)
         if options.action_library_in is not None:
             sim.action_library = ActionLibrary.load(options.action_library_in)
@@ -223,7 +230,9 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
             if options.update_every_tick:
                 now: float = time.monotonic()
                 if now - last_map_update_time >= MAP_UPDATE_INTERVAL_SECONDS:
-                    current_map: str = self._render_map(sim, options.local_map_radius)
+                    current_map: RenderedMap = self._render_map_model(
+                        sim, options.local_map_radius
+                    )
                     wx.CallAfter(self._set_map_value, current_map)
                     last_map_update_time = now
             if options.tick_delay_seconds > 0.0:
@@ -247,10 +256,10 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
             options.action_library_out,
             options.replay,
         )
-        map_str: str = ""
+        rendered_map: RenderedMap | None = None
         if options.print_map:
-            map_str = self._render_map(sim, options.local_map_radius)
-        return summary, map_str
+            rendered_map = self._render_map_model(sim, options.local_map_radius)
+        return summary, rendered_map
 
     @staticmethod
     def _run_batch(options: GuiRunOptions) -> str:
@@ -264,6 +273,7 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
                 seed=options.config.seed + offset,
                 enable_initial_discoverables=options.config.enable_initial_discoverables,
                 enable_goap_control=options.config.enable_goap_control,
+                tile_size_meters=options.config.tile_size_meters,
             )
             sim = Simulation(config)
             results.append(sim.run())
@@ -314,22 +324,84 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
             radius = local_map_radius
         return render_ascii_map(sim.world, sim.agent, radius=radius)
 
-    def _update_ui(self, summary: str, map_str: str) -> None:
+    @staticmethod
+    def _render_map_model(sim: Simulation, local_map_radius: int) -> RenderedMap:
+        radius: int | None = None
+        if local_map_radius > 0:
+            radius = local_map_radius
+        return render_map_model(sim.world, sim.agent, radius=radius)
+
+    def _update_ui(self, summary: str, rendered_map: RenderedMap | None) -> None:
         if not self._frame_is_alive():
             return
         try:
             self.summary_ctrl.SetValue(summary)
-            self.map_ctrl.SetValue(map_str)
+            if rendered_map is None:
+                self._set_map_text_preserving_view("")
+            else:
+                self._set_colored_map_value(rendered_map)
         except wx.PyDeadObjectError:
             return
 
-    def _set_map_value(self, map_str: str) -> None:
+    def _set_map_value(self, rendered_map: RenderedMap) -> None:
         if not self._frame_is_alive():
             return
         try:
-            self.map_ctrl.SetValue(map_str)
+            self._set_colored_map_value(rendered_map)
         except wx.PyDeadObjectError:
             return
+
+    def _set_colored_map_value(self, rendered_map: RenderedMap) -> None:
+        text: str = rendered_map_to_text(rendered_map)
+        state: TextViewState = self._capture_map_view_state()
+        self.map_ctrl.Freeze()
+        try:
+            self.map_ctrl.Clear()
+            self._write_rich_map_line(rendered_map.status, "summary")
+            self._write_rich_map_line(rendered_map.legend, "summary")
+            for row in rendered_map.rows:
+                for glyph in row:
+                    color_value: str = glyph.fg or ROLE_COLORS.get(
+                        glyph.role, "#d0d0d0"
+                    )
+                    self.map_ctrl.BeginTextColour(wx.Colour(color_value))
+                    self.map_ctrl.WriteText(glyph.char)
+                    self.map_ctrl.EndTextColour()
+                self.map_ctrl.WriteText("\n")
+            self._restore_map_view_state(state, len(text))
+        finally:
+            self.map_ctrl.Thaw()
+
+    def _set_map_text_preserving_view(self, map_str: str) -> None:
+        state: TextViewState = self._capture_map_view_state()
+        self.map_ctrl.Freeze()
+        try:
+            self.map_ctrl.SetValue(map_str)
+            self._restore_map_view_state(state, len(map_str))
+        finally:
+            self.map_ctrl.Thaw()
+
+    def _capture_map_view_state(self) -> TextViewState:
+        return TextViewState(
+            horizontal_scroll=self.map_ctrl.GetScrollPos(wx.HORIZONTAL),
+            vertical_scroll=self.map_ctrl.GetScrollPos(wx.VERTICAL),
+            insertion_point=self.map_ctrl.GetInsertionPoint(),
+        )
+
+    def _restore_map_view_state(self, state: TextViewState, text_length: int) -> None:
+        insertion_point: int = clamp_insertion_point(state.insertion_point, text_length)
+        self.map_ctrl.SetInsertionPoint(insertion_point)
+        self.map_ctrl.SetScrollPos(wx.HORIZONTAL, state.horizontal_scroll)
+        self.map_ctrl.SetScrollPos(wx.VERTICAL, state.vertical_scroll)
+        if hasattr(self.map_ctrl, "Scroll"):
+            self.map_ctrl.Scroll(state.horizontal_scroll, state.vertical_scroll)
+
+    def _write_rich_map_line(self, text: str, role: str) -> None:
+        color_value: str = ROLE_COLORS.get(role, "#d0d0d0")
+        self.map_ctrl.BeginTextColour(wx.Colour(color_value))
+        self.map_ctrl.WriteText(text)
+        self.map_ctrl.EndTextColour()
+        self.map_ctrl.WriteText("\n")
 
     def _enable_run_button(self) -> None:
         if not self._frame_is_alive():
