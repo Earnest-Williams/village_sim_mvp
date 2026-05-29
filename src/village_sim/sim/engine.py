@@ -187,8 +187,12 @@ class Simulation:
                 item.discovered = True
             self._log("memory", f"discovered {discoverable_id}")
 
-        if self._try_record_discoverable_exploitation(clock, observation):
+        interaction_ticks = self._try_record_discoverable_exploitation(
+            clock, observation
+        )
+        if interaction_ticks > 0:
             update_needs(self.agent, self.config)
+            self._advance_interaction_ticks(interaction_ticks)
             if not self.agent.alive:
                 self._log_agent_death()
             return
@@ -216,16 +220,16 @@ class Simulation:
         self,
         clock: SimClock,
         observation: Observation,
-    ) -> bool:
+    ) -> int:
         item = discoverable_at_or_adjacent(
             self.world,
             self.agent.position.x,
             self.agent.position.y,
         )
         if item is None:
-            return False
+            return 0
         if not self._should_exploit_discoverable(item):
-            return False
+            return 0
 
         before_snapshot = make_state_snapshot(
             tick=self.tick,
@@ -284,9 +288,26 @@ class Simulation:
             self.action_library.add(action)
 
         self._log("action", f"exploit {item.discoverable_id} {event_name}")
-        return True
+        return item.interaction_ticks
+
+    def _advance_interaction_ticks(self, interaction_ticks: int) -> None:
+        extra_ticks: int = max(0, interaction_ticks - 1)
+        while extra_ticks > 0 and self.tick < self.config.max_ticks() - 1:
+            self.tick += 1
+            busy_clock: SimClock = clock_from_tick(self.tick, self.config)
+            raining: bool = self.world.step_environment(
+                self.rng, self.config, busy_clock.tick_of_day
+            )
+            if raining and self.tick % 12 == 0:
+                self._log("weather", "rain fell")
+            update_needs(self.agent, self.config)
+            extra_ticks -= 1
+            if not self.agent.alive:
+                return
 
     def _should_exploit_discoverable(self, item: Discoverable) -> bool:
+        if item.amount <= 0.0:
+            return False
         if item.satisfies_need == "thirst":
             return self.agent.thirst >= 0.60
         if item.satisfies_need == "hunger":

@@ -200,6 +200,29 @@ class TestLiveTrajectoryAndGoapRuntime(unittest.TestCase):
         self.assertEqual(len(sim.recorded_trajectories), 1)
         self.assertEqual(sim.recorded_trajectories[0].task_name, "thirst")
 
+    def test_live_spring_exploit_advances_tick_by_interaction_ticks(self) -> None:
+        sim = _make_discoverable_sim()
+        sim.agent.position = Position(12, 12)
+        sim.agent.thirst = 0.9
+
+        sim.step()
+
+        self.assertEqual(sim.tick, 3)
+
+    def test_step_skips_depleted_discoverable_exploitation(self) -> None:
+        sim = _make_discoverable_sim()
+        sim.agent.position = Position(20, 18)
+        sim.agent.hunger = 0.9
+        bush = sim.world.discoverables["berry_bush_001"]
+        bush.amount = 0.0
+        bush.regrowth_per_day = 0.0
+
+        sim.step()
+
+        self.assertEqual(len(sim.recorded_trajectories), 0)
+        self.assertEqual(sim.tick, 1)
+        self.assertEqual(bush.amount, 0.0)
+
     def test_repeated_spring_exploits_synthesize_actions_and_goap_plan(self) -> None:
         sim = _make_discoverable_sim()
         sim.agent.position = Position(12, 12)
