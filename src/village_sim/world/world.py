@@ -12,6 +12,7 @@ from village_sim.world.grid import index_of, iter_neighbor_positions, iter_posit
 from village_sim.world.hydrology import step_hydrology
 from village_sim.world.resources import initialize_food, initialize_water, regrow_food
 from village_sim.world.terrain import (
+    carve_stream,
     classify_terrain,
     generate_height_map,
     estimate_slope,
@@ -35,6 +36,8 @@ class World:
     food: list[float]
     food_capacity: list[float]
     discoverables: dict[str, Discoverable] = field(default_factory=dict)
+    seed: int = 0
+    tile_size_meters: float = 2.0
 
     def index(self, position: Position) -> int:
         return index_of(self.width, position)
@@ -138,6 +141,7 @@ def generate_world(
     config.validate()
     height_map: list[float] = generate_height_map(config.width, config.height, rng)
     terrain: list[int] = classify_terrain(config.width, config.height, height_map, rng)
+    carve_stream(config.width, config.height, height_map, terrain, rng)
     water: list[float] = initialize_water(terrain)
     food, food_capacity = initialize_food(config.width, config.height, terrain, rng)
     return World(
@@ -149,6 +153,8 @@ def generate_world(
         food=food,
         food_capacity=food_capacity,
         discoverables=discoverables or {},
+        seed=config.seed,
+        tile_size_meters=config.tile_size_meters,
     )
 
 

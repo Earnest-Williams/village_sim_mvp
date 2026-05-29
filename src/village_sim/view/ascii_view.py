@@ -1,19 +1,60 @@
-"""ASCII debug renderer.
+"""Semantic map renderer with plain-text output compatibility.
 
 This renderer is intentionally read-only. It consumes world and agent state but does
-not own simulation truth.
+not own simulation truth. CLI and replay callers use the safe plain-text wrapper;
+GUI callers can use the semantic glyph rows for colored rendering.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from village_sim.agent.state import AgentState
 from village_sim.core.types import ActionKind, Position, TerrainKind
-from village_sim.world.grid import index_of
+from village_sim.world.discoverables import DiscoverableKind
+from village_sim.world.grid import index_of, iter_neighbor_positions
 from village_sim.world.world import World
 
 
-def render_ascii_map(world: World, agent: AgentState, radius: int | None = None) -> str:
-    """Render a compact top-down ASCII map."""
+@dataclass(frozen=True, slots=True)
+class MapGlyph:
+    """One rendered map glyph plus semantic styling metadata."""
+
+    char: str
+    role: str
+    fg: str | None = None
+    bg: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RenderedMap:
+    """Structured map output for text and colored GUI renderers."""
+
+    status: str
+    legend: str
+    rows: list[list[MapGlyph]]
+
+
+ROLE_COLORS: dict[str, str] = {
+    "agent": "#fff176",
+    "agent_sleeping": "#d7b85b",
+    "water": "#4fc3f7",
+    "broadleaf": "#2e7d32",
+    "evergreen": "#1b5e20",
+    "grass": "#7cb342",
+    "brush": "#827717",
+    "wetland": "#00897b",
+    "food": "#ec407a",
+    "rock": "#9e9e9e",
+    "cave": "#6d4c41",
+    "hill": "#b08d57",
+}
+
+
+def render_map_model(
+    world: World, agent: AgentState, radius: int | None = None
+) -> RenderedMap:
+    """Render a semantic top-down map model."""
 
     min_x: int = 0
     max_x: int = world.width - 1
@@ -25,35 +66,19 @@ def render_ascii_map(world: World, agent: AgentState, radius: int | None = None)
         min_y = max(0, agent.position.y - radius)
         max_y = min(world.height - 1, agent.position.y + radius)
 
-    lines: list[str] = []
+    rows: list[list[MapGlyph]] = []
     for y in range(min_y, max_y + 1):
-        chars: list[str] = []
+        row: list[MapGlyph] = []
         for x in range(min_x, max_x + 1):
-            position: Position = Position(x=x, y=y)
-            if position == agent.position:
-                chars.append("z" if agent.current_action is ActionKind.SLEEP else "@")
-                continue
-            index: int = index_of(world.width, position)
-            if world.food[index] >= 0.18:
-                chars.append("*")
-                continue
-            if world.water[index] >= 0.25:
-                chars.append("~")
-                continue
-            kind: TerrainKind = TerrainKind(world.terrain[index])
-            if kind is TerrainKind.WATER:
-                chars.append("~")
-            elif kind is TerrainKind.GRASS:
-                chars.append(".")
-            elif kind is TerrainKind.FOREST:
-                chars.append("T")
-            elif kind is TerrainKind.HILL:
-                chars.append("^")
-            else:
-                chars.append("#")
-        lines.append("".join(chars))
+            row.append(_glyph_for_position(world, agent, Position(x=x, y=y)))
+        rows.append(row)
+
+    tile_scale: str = _format_tile_scale(world.tile_size_meters)
     legend: str = (
-        "Legend: @ agent, z sleeping, ~ water, * food, T forest, ^ hill, # rock, . grass"
+        "Legend: @ agent, z sleeping, ~ stream/water, * food/berries, "
+        '♣ broadleaf, ♠ evergreen, . short grass, , uneven grass, " brush, '
+        "; wetland/reeds, ^ hill/elevation, # rock, C cave | "
+        f"Scale: 1 tile ≈ {tile_scale} x {tile_scale}"
     )
     status: str = (
         f"Agent: x={agent.position.x} y={agent.position.y} "
@@ -61,4 +86,144 @@ def render_ascii_map(world: World, agent: AgentState, radius: int | None = None)
         f"health={agent.health:.2f} thirst={agent.thirst:.2f} "
         f"hunger={agent.hunger:.2f} fatigue={agent.fatigue:.2f}"
     )
-    return "\n".join([status, legend, *lines])
+    return RenderedMap(status=status, legend=legend, rows=rows)
+
+
+def render_ascii_map(world: World, agent: AgentState, radius: int | None = None) -> str:
+    """Render a compact plain-text map for CLI and replay output."""
+
+    rendered: RenderedMap = render_map_model(world, agent, radius=radius)
+    lines: list[str] = [rendered.status, rendered.legend]
+    for row in rendered.rows:
+        lines.append("".join(glyph.char for glyph in row))
+    return "\n".join(lines)
+
+
+def rendered_map_to_text(rendered: RenderedMap) -> str:
+    """Convert a semantic map to plain text."""
+
+    lines: list[str] = [rendered.status, rendered.legend]
+    for row in rendered.rows:
+        lines.append("".join(glyph.char for glyph in row))
+    return "\n".join(lines)
+
+
+def _glyph_for_position(
+    world: World, agent: AgentState, position: Position
+) -> MapGlyph:
+    if position == agent.position:
+        if agent.current_action is ActionKind.SLEEP:
+            return _glyph("z", "agent_sleeping")
+        return _glyph("@", "agent")
+
+    discoverable_glyph: MapGlyph | None = _discoverable_glyph_at(world, position)
+    if discoverable_glyph is not None:
+        return discoverable_glyph
+
+    index: int = index_of(world.width, position)
+    if world.food[index] >= 0.18:
+        return _glyph("*", "food")
+    kind: TerrainKind = TerrainKind(world.terrain[index])
+    if kind is TerrainKind.WATER:
+        return _glyph("~", "water")
+    if _is_wetland_edge(world, position):
+        return _glyph(";", "wetland")
+    if kind is TerrainKind.GRASS:
+        return _grass_glyph_for_cell(world, position)
+    if kind is TerrainKind.FOREST:
+        return _vegetation_glyph_for_cell(world, position)
+    if kind is TerrainKind.HILL:
+        return _hill_glyph_for_cell(world, position)
+    return _glyph("#", "rock")
+
+
+def _discoverable_glyph_at(world: World, position: Position) -> MapGlyph | None:
+    for item in world.discoverables.values():
+        if item.x != position.x or item.y != position.y:
+            continue
+        if item.kind is DiscoverableKind.CAVE:
+            return _glyph("C", "cave")
+        if item.kind is DiscoverableKind.BERRY_BUSH and item.amount > 0.0:
+            return _glyph("*", "food")
+        if item.kind is DiscoverableKind.FRESHWATER_SPRING and item.amount > 0.0:
+            return _glyph("~", "water")
+    return None
+
+
+def _vegetation_glyph_for_cell(world: World, position: Position) -> MapGlyph:
+    noise: float = _cell_noise(world, position, salt=11)
+    adjacent_trees: int = _adjacent_tree_noise_count(world, position)
+    height_value: float = world.height_at(position)
+    if adjacent_trees >= 4:
+        return _glyph(
+            '"' if noise > 0.48 else ",", "brush" if noise > 0.48 else "grass"
+        )
+    if noise > 0.76:
+        if height_value > 0.58 and _cell_noise(world, position, salt=29) > 0.35:
+            return _glyph("♠", "evergreen")
+        return _glyph("♣", "broadleaf")
+    if noise > 0.48:
+        return _glyph('"', "brush")
+    if noise > 0.24:
+        return _glyph(",", "grass")
+    return _glyph(".", "grass")
+
+
+def _grass_glyph_for_cell(world: World, position: Position) -> MapGlyph:
+    noise: float = _cell_noise(world, position, salt=7)
+    if noise > 0.78:
+        return _glyph('"', "brush")
+    if noise > 0.42:
+        return _glyph(",", "grass")
+    return _glyph(".", "grass")
+
+
+def _hill_glyph_for_cell(world: World, position: Position) -> MapGlyph:
+    height_value: float = world.height_at(position)
+    if height_value > 0.86:
+        return _glyph("#", "rock")
+    return _glyph("^", "hill")
+
+
+def _is_wetland_edge(world: World, position: Position) -> bool:
+    kind: TerrainKind = world.terrain_at(position)
+    if kind is TerrainKind.WATER or kind is TerrainKind.ROCK:
+        return False
+    for neighbor in iter_neighbor_positions(world.width, world.height, position, True):
+        neighbor_index: int = index_of(world.width, neighbor)
+        neighbor_kind: TerrainKind = TerrainKind(world.terrain[neighbor_index])
+        if neighbor_kind is TerrainKind.WATER:
+            return True
+    return False
+
+
+def _adjacent_tree_noise_count(world: World, position: Position) -> int:
+    count: int = 0
+    for neighbor in iter_neighbor_positions(world.width, world.height, position, True):
+        neighbor_index: int = index_of(world.width, neighbor)
+        if TerrainKind(world.terrain[neighbor_index]) is not TerrainKind.FOREST:
+            continue
+        if _cell_noise(world, neighbor, salt=11) > 0.76:
+            count += 1
+    return count
+
+
+def _cell_noise(world: World, position: Position, *, salt: int) -> float:
+    value: int = world.seed & 0xFFFF_FFFF
+    value ^= (position.x + 0x9E37_79B9 + (value << 6) + (value >> 2)) & 0xFFFF_FFFF
+    value ^= (position.y + 0x85EB_CA6B + (value << 6) + (value >> 2)) & 0xFFFF_FFFF
+    value ^= (salt * 0xC2B2_AE35) & 0xFFFF_FFFF
+    value = (value ^ (value >> 16)) * 0x7FEB_352D & 0xFFFF_FFFF
+    value = (value ^ (value >> 15)) * 0x846C_A68B & 0xFFFF_FFFF
+    value ^= value >> 16
+    return float(value & 0xFFFF_FFFF) / float(0xFFFF_FFFF)
+
+
+def _glyph(char: str, role: str) -> MapGlyph:
+    return MapGlyph(char=char, role=role, fg=ROLE_COLORS.get(role), bg=None)
+
+
+def _format_tile_scale(tile_size_meters: float) -> str:
+    if tile_size_meters.is_integer():
+        return f"{tile_size_meters:.0f}m"
+    return f"{tile_size_meters:.1f}m"

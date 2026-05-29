@@ -43,6 +43,30 @@ Run several seeds:
 PYTHONPATH=src python -m village_sim --batch 25 --days 10 --width 32 --height 32
 ```
 
+
+## Map scale and terrain presentation
+
+The debug map keeps simulation truth data-oriented while rendering a more semantic
+plain-text view: each tile represents approximately **2m x 2m** outdoors. Water
+terrain is generated as a narrow connected stream that enters from one map edge
+and exits another rather than broad lowland lakes.
+
+Map glyphs:
+
+- `@` awake agent; `z` sleeping agent.
+- `~` stream/water.
+- `♣` broadleaf or heavy vegetation; `♠` evergreen, pine, or jagged wilderness.
+- `.` short grass/open plain; `,` uneven grass; `"` tall grass or brush.
+- `;` wetlands, reeds, or marshy grass near the stream.
+- `*` food patches or berries.
+- `^` hill/elevation; `#` rock; `C` cave.
+
+CLI and replay map output remains safe plain text. The wx GUI map uses the same
+semantic glyphs with role-based colors for agents, water, vegetation, food,
+wetlands, hills, rocks, and caves. During live tick updates the wx map preserves
+the current scroll position, so users can scroll around larger maps while the
+simulation continues running.
+
 ## wxPython interface
 
 Install GUI dependencies:

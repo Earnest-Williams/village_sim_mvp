@@ -8,15 +8,82 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import wx  # type: ignore[import-not-found]
+import wx.stc as wxstc  # type: ignore[import-not-found]
 
 from village_sim.core.config import SimConfig
 from village_sim.orchestrator.action_model import ActionLibrary
 from village_sim.sim.engine import Simulation
 from village_sim.sim.metrics import SimResult
 from village_sim.sim.replay import write_run_report
-from village_sim.view.ascii_view import render_ascii_map
+from village_sim.view.ascii_view import (
+    ROLE_COLORS,
+    RenderedMap,
+    render_ascii_map,
+    render_map_model,
+)
 
 MAP_UPDATE_INTERVAL_SECONDS: float = 0.05
+
+# Maps each semantic glyph role to an STC style number (1–13).
+# Style 0 is left as the STC default (used for newlines and unknown roles).
+_STC_ROLE_STYLE: dict[str, int] = {
+    "summary": 1,
+    "agent": 2,
+    "agent_sleeping": 3,
+    "water": 4,
+    "broadleaf": 5,
+    "evergreen": 6,
+    "grass": 7,
+    "brush": 8,
+    "wetland": 9,
+    "food": 10,
+    "rock": 11,
+    "cave": 12,
+    "hill": 13,
+}
+
+
+def _build_stc_content(rendered_map: RenderedMap) -> tuple[str, list[tuple[int, int]]]:
+    """Return ``(full_text, style_runs)`` for STC rendering.
+
+    *style_runs* is a list of ``(utf8_byte_count, style_number)`` pairs
+    describing consecutive same-style segments.  Callers apply them with a
+    single ``StartStyling(0)`` followed by one ``SetStyling`` per run — the
+    most efficient path through the STC API because:
+
+    * all text is a single string (one ``SetText`` call), and
+    * consecutive same-role glyphs are merged, minimising style-change ops.
+
+    Multi-byte Unicode characters (e.g. ♣ U+2663 = 3 UTF-8 bytes) are
+    accounted for correctly: every byte in a glyph is assigned the same style.
+    """
+    text_parts: list[str] = []
+    style_runs: list[tuple[int, int]] = []
+    current_style: int = -1
+    current_bytes: int = 0
+
+    def _append(text: str, style: int) -> None:
+        nonlocal current_style, current_bytes
+        text_parts.append(text)
+        byte_len = len(text.encode("utf-8"))
+        if style == current_style:
+            current_bytes += byte_len
+        else:
+            if current_bytes > 0:
+                style_runs.append((current_bytes, current_style))
+            current_style = style
+            current_bytes = byte_len
+
+    summary_style = _STC_ROLE_STYLE["summary"]
+    _append(rendered_map.status + "\n", summary_style)
+    _append(rendered_map.legend + "\n", summary_style)
+    for row in rendered_map.rows:
+        for glyph in row:
+            _append(glyph.char, _STC_ROLE_STYLE.get(glyph.role, 0))
+        _append("\n", 0)
+    if current_bytes > 0:
+        style_runs.append((current_bytes, current_style))
+    return "".join(text_parts), style_runs
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,10 +185,25 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
             size=(-1, 150),
         )
         self.summary_ctrl.SetBackgroundColour(panel.GetBackgroundColour())
-        self.map_ctrl = wx.TextCtrl(
-            panel, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.HSCROLL | wx.TE_DONTWRAP
-        )
-        self.map_ctrl.SetFont(wx.Font(wx.FontInfo(10).Family(wx.FONTFAMILY_TELETYPE)))
+        self.map_ctrl = wxstc.StyledTextCtrl(panel, style=wx.BORDER_NONE)
+        self.map_ctrl.SetReadOnly(True)
+        self.map_ctrl.SetWrapMode(wxstc.STC_WRAP_NONE)
+        self.map_ctrl.SetScrollWidthTracking(True)
+        self.map_ctrl.SetScrollWidth(1)
+        self.map_ctrl.SetUndoCollection(False)
+        # Hide the blinking caret — this is a display-only control.
+        self.map_ctrl.SetCaretWidth(0)
+        # Remove all editor margins (line numbers, fold marks, etc.).
+        for _margin in range(5):
+            self.map_ctrl.SetMarginWidth(_margin, 0)
+        # Set monospace font on the default style then propagate to all styles.
+        _mono_font = wx.Font(wx.FontInfo(10).Family(wx.FONTFAMILY_TELETYPE))
+        self.map_ctrl.StyleSetFont(wxstc.STC_STYLE_DEFAULT, _mono_font)
+        self.map_ctrl.StyleClearAll()
+        # Assign the role foreground colors.
+        for _role, _style_num in _STC_ROLE_STYLE.items():
+            _color = wx.Colour(ROLE_COLORS.get(_role, "#d0d0d0"))
+            self.map_ctrl.StyleSetForeground(_style_num, _color)
 
         root_sizer.Add(controls_sizer, 0, wx.EXPAND | wx.ALL, 12)
         root_sizer.Add(self.run_button, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
@@ -131,9 +213,7 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
         root_sizer.Add(
             self.summary_ctrl, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12
         )
-        root_sizer.Add(
-            wx.StaticText(panel, label="ASCII Map"), 0, wx.LEFT | wx.RIGHT, 12
-        )
+        root_sizer.Add(wx.StaticText(panel, label="Map"), 0, wx.LEFT | wx.RIGHT, 12)
         root_sizer.Add(self.map_ctrl, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
 
         panel.SetSizer(root_sizer)
@@ -156,17 +236,17 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
     def on_run(self, _: wx.CommandEvent) -> None:
         self.run_button.Disable()
         self.summary_ctrl.Clear()
-        self.map_ctrl.Clear()
+        self._clear_map_ctrl()
         options: GuiRunOptions = self._collect_options()
 
         def thread_target() -> None:
             try:
                 if options.batch > 1:
                     summary = self._run_batch(options)
-                    wx.CallAfter(self._update_ui, summary, "")
+                    wx.CallAfter(self._update_ui, summary, None)
                     return
-                summary, map_str = self._run_single(options)
-                wx.CallAfter(self._update_ui, summary, map_str)
+                summary, rendered_map = self._run_single(options)
+                wx.CallAfter(self._update_ui, summary, rendered_map)
             except Exception as error:
                 message: str = f"Simulation failed: {error}"
                 wx.CallAfter(
@@ -209,7 +289,7 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
             return None
         return Path(raw_path)
 
-    def _run_single(self, options: GuiRunOptions) -> tuple[str, str]:
+    def _run_single(self, options: GuiRunOptions) -> tuple[str, RenderedMap | None]:
         sim = Simulation(options.config)
         if options.action_library_in is not None:
             sim.action_library = ActionLibrary.load(options.action_library_in)
@@ -223,7 +303,9 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
             if options.update_every_tick:
                 now: float = time.monotonic()
                 if now - last_map_update_time >= MAP_UPDATE_INTERVAL_SECONDS:
-                    current_map: str = self._render_map(sim, options.local_map_radius)
+                    current_map: RenderedMap = self._render_map_model(
+                        sim, options.local_map_radius
+                    )
                     wx.CallAfter(self._set_map_value, current_map)
                     last_map_update_time = now
             if options.tick_delay_seconds > 0.0:
@@ -247,10 +329,10 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
             options.action_library_out,
             options.replay,
         )
-        map_str: str = ""
+        rendered_map: RenderedMap | None = None
         if options.print_map:
-            map_str = self._render_map(sim, options.local_map_radius)
-        return summary, map_str
+            rendered_map = self._render_map_model(sim, options.local_map_radius)
+        return summary, rendered_map
 
     @staticmethod
     def _run_batch(options: GuiRunOptions) -> str:
@@ -264,6 +346,7 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
                 seed=options.config.seed + offset,
                 enable_initial_discoverables=options.config.enable_initial_discoverables,
                 enable_goap_control=options.config.enable_goap_control,
+                tile_size_meters=options.config.tile_size_meters,
             )
             sim = Simulation(config)
             results.append(sim.run())
@@ -314,22 +397,59 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
             radius = local_map_radius
         return render_ascii_map(sim.world, sim.agent, radius=radius)
 
-    def _update_ui(self, summary: str, map_str: str) -> None:
+    @staticmethod
+    def _render_map_model(sim: Simulation, local_map_radius: int) -> RenderedMap:
+        radius: int | None = None
+        if local_map_radius > 0:
+            radius = local_map_radius
+        return render_map_model(sim.world, sim.agent, radius=radius)
+
+    def _update_ui(self, summary: str, rendered_map: RenderedMap | None) -> None:
         if not self._frame_is_alive():
             return
         try:
             self.summary_ctrl.SetValue(summary)
-            self.map_ctrl.SetValue(map_str)
+            if rendered_map is None:
+                self._set_map_text_preserving_view("")
+            else:
+                self._set_colored_map_value(rendered_map)
         except wx.PyDeadObjectError:
             return
 
-    def _set_map_value(self, map_str: str) -> None:
+    def _set_map_value(self, rendered_map: RenderedMap) -> None:
         if not self._frame_is_alive():
             return
         try:
-            self.map_ctrl.SetValue(map_str)
+            self._set_colored_map_value(rendered_map)
         except wx.PyDeadObjectError:
             return
+
+    def _set_colored_map_value(self, rendered_map: RenderedMap) -> None:
+        full_text, style_runs = _build_stc_content(rendered_map)
+        first_line: int = self.map_ctrl.GetFirstVisibleLine()
+        x_offset: int = self.map_ctrl.GetXOffset()
+        self.map_ctrl.SetReadOnly(False)
+        self.map_ctrl.SetText(full_text)
+        self.map_ctrl.StartStyling(0)
+        for byte_len, style_num in style_runs:
+            self.map_ctrl.SetStyling(byte_len, style_num)
+        self.map_ctrl.SetFirstVisibleLine(first_line)
+        self.map_ctrl.SetXOffset(x_offset)
+        self.map_ctrl.SetReadOnly(True)
+
+    def _set_map_text_preserving_view(self, map_str: str) -> None:
+        first_line: int = self.map_ctrl.GetFirstVisibleLine()
+        x_offset: int = self.map_ctrl.GetXOffset()
+        self.map_ctrl.SetReadOnly(False)
+        self.map_ctrl.SetText(map_str)
+        self.map_ctrl.SetFirstVisibleLine(first_line)
+        self.map_ctrl.SetXOffset(x_offset)
+        self.map_ctrl.SetReadOnly(True)
+
+    def _clear_map_ctrl(self) -> None:
+        self.map_ctrl.SetReadOnly(False)
+        self.map_ctrl.ClearAll()
+        self.map_ctrl.SetReadOnly(True)
 
     def _enable_run_button(self) -> None:
         if not self._frame_is_alive():
