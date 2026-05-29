@@ -89,7 +89,8 @@ class VillageSimFrame(wx.Frame):
         def thread_target() -> None:
             try:
                 sim = Simulation(config)
-                while sim.tick < config.max_ticks() and sim.agent.alive:
+                max_ticks: int = config.max_ticks()
+                while sim.tick < max_ticks and sim.agent.alive:
                     sim.step()
                     if update_every_tick:
                         map_str: str = render_ascii_map(sim.world, sim.agent)
