@@ -7,7 +7,6 @@ from village_sim.orchestrator.action_model import (
     ActionLifecycle,
     ActionScope,
     CostModel,
-    EffectEstimate,
     ExecutionPayload,
     ExecutorType,
     SynthesizedAction,
@@ -23,6 +22,7 @@ from village_sim.orchestrator.evaluator import (
     evaluate_thirst_task,
 )
 from village_sim.orchestrator.induction import (
+    EffectEstimate,
     average_cost,
     infer_hard_preconditions,
     infer_need_effect,
@@ -50,7 +50,7 @@ class Orchestrator:
         key = cluster_key_for_trajectory(trajectory)
 
         is_success = False
-        for need, evaluator in _EVALUATORS.items():
+        for evaluator in _EVALUATORS.values():
             result: TaskResult = evaluator(trajectory)
             if result.success:
                 is_success = True
@@ -62,15 +62,13 @@ class Orchestrator:
             self._failed.setdefault(key, []).append(trajectory)
 
     def synthesize_all(self) -> list[SynthesizedAction]:
-        """Attempt to synthesize one action per cluster that has enough data."""
+        """Attempt to synthesize instance and template actions per ready cluster."""
         actions: list[SynthesizedAction] = []
         for key, successful in self._clusters.items():
             if len(successful) < 10:
                 continue  # insufficient evidence
             failed = self._failed.get(key, [])
-            action = self._synthesize_cluster(key, successful, failed)
-            if action is not None:
-                actions.append(action)
+            actions.extend(self._synthesize_cluster(key, successful, failed))
         return actions
 
     def _synthesize_cluster(
@@ -78,21 +76,18 @@ class Orchestrator:
         cluster_key: str,
         successful: list[Trajectory],
         failed: list[Trajectory],
-    ) -> SynthesizedAction | None:
+    ) -> list[SynthesizedAction]:
         parts = cluster_key.split(":")
-        task_name = parts[0] if len(parts) > 0 else "unknown"
         target_type = parts[1] if len(parts) > 1 else "none"
 
-        # Representative trajectory for payload extraction
+        # Representative trajectory for payload extraction.
         rep = successful[0]
         target_id = str(rep.start.symbolic.get("target_id", "unknown"))
 
-        action_id = f"action_exploit_{target_id}_v1"
-        policy_id = f"policy_exploit_{target_type}_v1"
-
         preconditions = infer_hard_preconditions(successful, failed)
+        preconditions.pop("target_id", None)
         if not preconditions:
-            return None  # cannot build a meaningful action without preconditions
+            return []  # cannot build a meaningful action without preconditions
 
         soft_preconditions = infer_soft_preconditions(successful, failed)
 
@@ -103,48 +98,104 @@ class Orchestrator:
                 effects[f"{need.value}_delta"] = estimate
 
         if not effects:
-            return None
+            return []
 
         base_ticks = average_cost(successful)
         total = len(successful) + len(failed)
         succ_rate = len(successful) / total if total else 0.0
         death_ct = sum(1 for t in failed if t.end.needs.health <= 0.0)
         timeout_ct = sum(1 for t in failed if t.cost_ticks > 500)
-
-        scope = (
-            ActionScope.INSTANCE
-            if target_id not in ("none", "unknown")
-            else ActionScope.TEMPLATE
+        confidence = ActionConfidence(
+            trials=total,
+            successful_trials=len(successful),
+            failed_trials=len(failed),
+            success_rate=round(succ_rate, 4),
+            death_rate=round(death_ct / total, 4) if total else 0.0,
+            timeout_rate=round(timeout_ct / total, 4) if total else 0.0,
         )
+        night_multiplier = 1.0 if target_type == "freshwater_spring" else 1.25
+        cost_model = CostModel(
+            base_ticks=round(base_ticks, 1),
+            distance_weight=0.0,
+            fatigue_weight=1.0,
+            night_multiplier=night_multiplier,
+        )
+
+        actions: list[SynthesizedAction] = []
+        if target_id not in ("none", "unknown"):
+            actions.append(
+                self._build_action(
+                    target_type=target_type,
+                    target_id=target_id,
+                    scope=ActionScope.INSTANCE,
+                    preconditions=preconditions,
+                    soft_preconditions=soft_preconditions,
+                    effects=effects,
+                    cost_model=cost_model,
+                    confidence=confidence,
+                )
+            )
+
+        if target_type != "none":
+            actions.append(
+                self._build_action(
+                    target_type=target_type,
+                    target_id=target_id,
+                    scope=ActionScope.TEMPLATE,
+                    preconditions=preconditions,
+                    soft_preconditions=soft_preconditions,
+                    effects=effects,
+                    cost_model=cost_model,
+                    confidence=confidence,
+                )
+            )
+
+        return actions
+
+    def _build_action(
+        self,
+        *,
+        target_type: str,
+        target_id: str,
+        scope: ActionScope,
+        preconditions: dict[str, bool | int | float | str],
+        soft_preconditions: dict[str, float],
+        effects: dict[str, EffectEstimate],
+        cost_model: CostModel,
+        confidence: ActionConfidence,
+    ) -> SynthesizedAction:
+        action_suffix = _action_suffix(target_type, target_id, scope)
+        action_id = f"action_exploit_{action_suffix}_v1"
+        policy_id = f"policy_exploit_{target_type}_v1"
+        action_preconditions = dict(preconditions)
+        if scope is ActionScope.INSTANCE:
+            action_preconditions["target_id"] = target_id
         target_binding = (
             TargetBinding(mode="resource_id", resource_id=target_id)
             if scope is ActionScope.INSTANCE
             else TargetBinding(mode="current_target", required_type=target_type)
         )
-
+        display_target = target_type if scope is ActionScope.TEMPLATE else action_suffix
         action = SynthesizedAction(
             schema_version=self._schema_version,
             action_id=action_id,
-            display_name=f"Exploit {target_id.replace('_', ' ')}",
+            display_name=f"Exploit {display_target.replace('_', ' ')}",
             scope=scope,
             lifecycle=ActionLifecycle.CANDIDATE,
-            preconditions=preconditions,
-            soft_preconditions=soft_preconditions,
-            effects=effects,
+            preconditions=action_preconditions,
+            soft_preconditions=dict(soft_preconditions),
+            effects=dict(effects),
             side_effects={},
-            cost_model=CostModel(
-                base_ticks=round(base_ticks, 1),
-                distance_weight=0.0,
-                fatigue_weight=1.0,
-                night_multiplier=1.25,
-            ),
+            cost_model=cost_model,
             confidence=ActionConfidence(
-                trials=total,
-                successful_trials=len(successful),
-                failed_trials=len(failed),
-                success_rate=round(succ_rate, 4),
-                death_rate=round(death_ct / total, 4) if total else 0.0,
-                timeout_rate=round(timeout_ct / total, 4) if total else 0.0,
+                trials=confidence.trials,
+                successful_trials=confidence.successful_trials,
+                failed_trials=confidence.failed_trials,
+                success_rate=confidence.success_rate,
+                death_rate=confidence.death_rate,
+                timeout_rate=confidence.timeout_rate,
+                death_trials=confidence.death_trials,
+                timeout_trials=confidence.timeout_trials,
             ),
             execution_payload=ExecutionPayload(
                 type=ExecutorType.RL_POLICY,
@@ -158,3 +209,14 @@ class Orchestrator:
             action.lifecycle = ActionLifecycle.TRUSTED
 
         return action
+
+
+def _action_suffix(target_type: str, target_id: str, scope: ActionScope) -> str:
+    if scope is ActionScope.TEMPLATE:
+        return f"{target_type}_template"
+    if target_id.startswith(f"{target_type}_"):
+        return target_id
+    target_parts = target_id.rsplit("_", maxsplit=1)
+    if len(target_parts) == 2 and target_parts[1].isdigit():
+        return f"{target_type}_{target_parts[1]}"
+    return target_id

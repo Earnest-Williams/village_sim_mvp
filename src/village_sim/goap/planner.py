@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from village_sim.orchestrator.action_model import (
     ActionLifecycle,
     SynthesizedAction,
 )
-from village_sim.orchestrator.symbolic import FactValue, SymbolicState
+from village_sim.orchestrator.symbolic import FactValue
 
 
 @dataclass
@@ -19,7 +20,7 @@ class PlanStep:
 
 def _action_applicable(
     action: SynthesizedAction,
-    state: SymbolicState,
+    state: Mapping[str, FactValue],
 ) -> bool:
     """Check hard preconditions against the current symbolic state."""
     for fact, required_value in action.preconditions.items():
@@ -44,8 +45,8 @@ def _expected_cost(action: SynthesizedAction, failure_penalty: float = 50.0) -> 
 
 def _action_advances_goal(
     action: SynthesizedAction,
-    state: SymbolicState,
-    goal: SymbolicState,
+    state: Mapping[str, FactValue],
+    goal: Mapping[str, FactValue],
 ) -> bool:
     """True if at least one effect moves toward an unsatisfied goal."""
     for goal_fact, goal_value in goal.items():
@@ -61,8 +62,8 @@ def _action_advances_goal(
 
 
 def plan(
-    state: SymbolicState,
-    goal: SymbolicState,
+    state: Mapping[str, FactValue],
+    goal: Mapping[str, FactValue],
     library: list[SynthesizedAction],
     agent_lifecycle_floor: ActionLifecycle = ActionLifecycle.CANDIDATE,
 ) -> list[PlanStep]:

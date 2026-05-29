@@ -5,13 +5,7 @@ from __future__ import annotations
 import threading
 import time
 
-try:
-    import wx
-except ImportError as exc:
-    raise SystemExit(
-        "wxPython is required to run the GUI. "
-        'Please install it with: pip install "village-sim-mvp[gui]"'
-    ) from exc
+import wx  # type: ignore[import-not-found]
 
 from village_sim.core.config import SimConfig
 from village_sim.sim.engine import Simulation
@@ -21,7 +15,7 @@ from village_sim.view.ascii_view import render_ascii_map
 MAP_UPDATE_INTERVAL_SECONDS: float = 0.05
 
 
-class VillageSimFrame(wx.Frame):
+class VillageSimFrame(wx.Frame):  # type: ignore[misc]
     def __init__(self) -> None:
         super().__init__(parent=None, title="Village Sim MVP", size=(980, 760))
         panel = wx.Panel(self)
@@ -38,17 +32,27 @@ class VillageSimFrame(wx.Frame):
         self.tick_update_ctrl = wx.CheckBox(panel, label="Update map every tick")
         self.speed_ctrl = wx.SpinCtrl(panel, min=0, max=1000, initial=25)
 
-        controls_sizer.Add(wx.StaticText(panel, label="Seed"), 0, wx.ALIGN_CENTER_VERTICAL)
+        controls_sizer.Add(
+            wx.StaticText(panel, label="Seed"), 0, wx.ALIGN_CENTER_VERTICAL
+        )
         controls_sizer.Add(self.seed_ctrl, 1, wx.EXPAND)
-        controls_sizer.Add(wx.StaticText(panel, label="Days"), 0, wx.ALIGN_CENTER_VERTICAL)
+        controls_sizer.Add(
+            wx.StaticText(panel, label="Days"), 0, wx.ALIGN_CENTER_VERTICAL
+        )
         controls_sizer.Add(self.days_ctrl, 1, wx.EXPAND)
-        controls_sizer.Add(wx.StaticText(panel, label="Width"), 0, wx.ALIGN_CENTER_VERTICAL)
+        controls_sizer.Add(
+            wx.StaticText(panel, label="Width"), 0, wx.ALIGN_CENTER_VERTICAL
+        )
         controls_sizer.Add(self.width_ctrl, 1, wx.EXPAND)
-        controls_sizer.Add(wx.StaticText(panel, label="Height"), 0, wx.ALIGN_CENTER_VERTICAL)
+        controls_sizer.Add(
+            wx.StaticText(panel, label="Height"), 0, wx.ALIGN_CENTER_VERTICAL
+        )
         controls_sizer.Add(self.height_ctrl, 1, wx.EXPAND)
         controls_sizer.Add(self.tick_update_ctrl, 0, wx.ALIGN_CENTER_VERTICAL)
         controls_sizer.Add((0, 0), 1, wx.EXPAND)
-        controls_sizer.Add(wx.StaticText(panel, label="Tick delay (ms)"), 0, wx.ALIGN_CENTER_VERTICAL)
+        controls_sizer.Add(
+            wx.StaticText(panel, label="Tick delay (ms)"), 0, wx.ALIGN_CENTER_VERTICAL
+        )
         controls_sizer.Add(self.speed_ctrl, 1, wx.EXPAND)
 
         self.run_button = wx.Button(panel, label="Run Simulation")
@@ -67,9 +71,15 @@ class VillageSimFrame(wx.Frame):
 
         root_sizer.Add(controls_sizer, 0, wx.EXPAND | wx.ALL, 12)
         root_sizer.Add(self.run_button, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
-        root_sizer.Add(wx.StaticText(panel, label="Run Summary"), 0, wx.LEFT | wx.RIGHT, 12)
-        root_sizer.Add(self.summary_ctrl, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
-        root_sizer.Add(wx.StaticText(panel, label="ASCII Map"), 0, wx.LEFT | wx.RIGHT, 12)
+        root_sizer.Add(
+            wx.StaticText(panel, label="Run Summary"), 0, wx.LEFT | wx.RIGHT, 12
+        )
+        root_sizer.Add(
+            self.summary_ctrl, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12
+        )
+        root_sizer.Add(
+            wx.StaticText(panel, label="ASCII Map"), 0, wx.LEFT | wx.RIGHT, 12
+        )
         root_sizer.Add(self.map_ctrl, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
 
         panel.SetSizer(root_sizer)
@@ -92,14 +102,16 @@ class VillageSimFrame(wx.Frame):
             try:
                 sim = Simulation(config)
                 max_ticks: int = config.max_ticks()
-                last_map_update_time: float = time.monotonic() - MAP_UPDATE_INTERVAL_SECONDS
+                last_map_update_time: float = (
+                    time.monotonic() - MAP_UPDATE_INTERVAL_SECONDS
+                )
                 while sim.tick < max_ticks and sim.agent.alive:
                     sim.step()
                     if update_every_tick:
                         now: float = time.monotonic()
                         if now - last_map_update_time >= MAP_UPDATE_INTERVAL_SECONDS:
-                            map_str: str = render_ascii_map(sim.world, sim.agent)
-                            wx.CallAfter(self._set_map_value, map_str)
+                            current_map: str = render_ascii_map(sim.world, sim.agent)
+                            wx.CallAfter(self._set_map_value, current_map)
                             last_map_update_time = now
                     if tick_delay_seconds > 0.0:
                         time.sleep(tick_delay_seconds)

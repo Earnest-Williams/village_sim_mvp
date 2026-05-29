@@ -6,10 +6,10 @@ import json
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 from village_sim.orchestrator.induction import EffectEstimate
 from village_sim.orchestrator.symbolic import FactValue
-
 
 # ── Supporting types ──────────────────────────────────────────────────────────
 
@@ -89,14 +89,17 @@ class SynthesizedAction:
     confidence: ActionConfidence
     execution_payload: ExecutionPayload
 
-    def to_dict(self) -> dict:
-        return asdict(self)  # type: ignore[arg-type]
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        if not isinstance(data, dict):
+            raise TypeError("synthesized action serialization must produce a dict")
+        return data
 
     def to_json(self, indent: int = 2) -> str:
         return json.dumps(self.to_dict(), indent=indent)
 
     @staticmethod
-    def from_dict(data: dict) -> SynthesizedAction:
+    def from_dict(data: dict[str, Any]) -> SynthesizedAction:
         """Deserialise from a plain dict (e.g. loaded from JSON)."""
         return SynthesizedAction(
             schema_version=data["schema_version"],
@@ -107,12 +110,10 @@ class SynthesizedAction:
             preconditions=data["preconditions"],
             soft_preconditions=data.get("soft_preconditions", {}),
             effects={
-                k: EffectEstimate(**v)
-                for k, v in data.get("effects", {}).items()
+                k: EffectEstimate(**v) for k, v in data.get("effects", {}).items()
             },
             side_effects={
-                k: EffectEstimate(**v)
-                for k, v in data.get("side_effects", {}).items()
+                k: EffectEstimate(**v) for k, v in data.get("side_effects", {}).items()
             },
             cost_model=CostModel(**data["cost_model"]),
             confidence=ActionConfidence(**data["confidence"]),
@@ -169,27 +170,30 @@ class ActionLibrary:
 
     def trusted_actions(self) -> list[SynthesizedAction]:
         return [
-            a for a in self._actions.values()
-            if a.lifecycle is ActionLifecycle.TRUSTED
+            a for a in self._actions.values() if a.lifecycle is ActionLifecycle.TRUSTED
         ]
 
     def actions_for_lifecycle(
         self, lifecycle: ActionLifecycle
     ) -> list[SynthesizedAction]:
-        return [
-            a for a in self._actions.values()
-            if a.lifecycle is lifecycle
-        ]
+        return [a for a in self._actions.values() if a.lifecycle is lifecycle]
 
     def save(self, path: Path) -> None:
         """Serialise all actions to a JSON file. Generates data, not code (§34)."""
-        data = [a.to_dict() for a in self._actions.values()]
+        data: list[dict[str, Any]] = [
+            action.to_dict() for action in self._actions.values()
+        ]
         path.write_text(json.dumps(data, indent=2))
 
     @classmethod
     def load(cls, path: Path) -> ActionLibrary:
         library = cls()
-        for item in json.loads(path.read_text()):
+        raw = json.loads(path.read_text())
+        if not isinstance(raw, list):
+            raise ValueError("action library file must contain a JSON list")
+        for item in raw:
+            if not isinstance(item, dict):
+                raise ValueError("each action library entry must be a JSON object")
             library.add(SynthesizedAction.from_dict(item))
         return library
 

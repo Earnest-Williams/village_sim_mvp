@@ -17,6 +17,8 @@ from village_sim.orchestrator.induction import (
     infer_hard_preconditions,
     infer_need_effect,
 )
+from village_sim.orchestrator.action_model import ActionScope
+from village_sim.orchestrator.orchestrator import _action_suffix
 from village_sim.orchestrator.trajectory import (
     NeedState,
     StateSnapshot,
@@ -138,6 +140,16 @@ class TestEffectInference(unittest.TestCase):
         trajs = [_make_trajectory(0.1, 0.8, 0.1, 0.15, ticks=10) for _ in range(3)]
         cost = average_cost(trajs)
         self.assertAlmostEqual(cost, 10.0)
+
+
+class TestActionSuffix(unittest.TestCase):
+    def test_preserves_full_target_id_when_suffix_is_not_numeric(self) -> None:
+        self.assertEqual(
+            _action_suffix(
+                "freshwater_spring", "spring_001_active", ActionScope.INSTANCE
+            ),
+            "spring_001_active",
+        )
 
 
 if __name__ == "__main__":

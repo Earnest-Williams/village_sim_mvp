@@ -79,7 +79,10 @@ class TestPacketSerialisationRoundTrip(unittest.TestCase):
         self.assertEqual(len(loaded), 1)
         self.assertEqual(loaded[0]["knowledge_type"], "world_fact")
         self.assertEqual(loaded[0]["confidence"], 0.95)
-        self.assertEqual(loaded[0]["data"]["resource_id"], "spring_001")
+        loaded_data = loaded[0]["data"]
+        self.assertIsInstance(loaded_data, dict)
+        assert isinstance(loaded_data, dict)
+        self.assertEqual(loaded_data["resource_id"], "spring_001")
 
     def test_action_knowledge_packet_round_trip(self) -> None:
         packet = ActionKnowledgePacket(
