@@ -13,7 +13,6 @@ from village_sim.orchestrator.action_model import (
     SynthesizedAction,
     TargetBinding,
     is_promotable,
-    promote_action,
 )
 from village_sim.orchestrator.evaluator import (
     NeedName,
@@ -156,7 +155,6 @@ class Orchestrator:
         )
 
         if is_promotable(action.confidence):
-            promote_action(action)
-            promote_action(action)  # candidate → validated → trusted
+            action.lifecycle = ActionLifecycle.TRUSTED
 
         return action

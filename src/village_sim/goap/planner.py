@@ -44,10 +44,13 @@ def _expected_cost(action: SynthesizedAction, failure_penalty: float = 50.0) -> 
 
 def _action_advances_goal(
     action: SynthesizedAction,
+    state: SymbolicState,
     goal: SymbolicState,
 ) -> bool:
-    """True if at least one effect moves toward the goal."""
+    """True if at least one effect moves toward an unsatisfied goal."""
     for goal_fact, goal_value in goal.items():
+        if state.get(goal_fact) == goal_value:
+            continue
         need_prefix = goal_fact.replace("_bucket", "")
         delta_key = f"{need_prefix}_delta"
         if delta_key in action.effects:
@@ -83,7 +86,7 @@ def plan(
             continue
         if not _action_applicable(action, state):
             continue
-        if not _action_advances_goal(action, goal):
+        if not _action_advances_goal(action, state, goal):
             continue
         candidates.append(PlanStep(action=action, expected_cost=_expected_cost(action)))
 

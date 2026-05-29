@@ -116,7 +116,8 @@ class TestActionAdvancesGoal(unittest.TestCase):
             effects={"thirst_delta": EffectEstimate(mean=-0.65, p10=-0.75, p90=-0.55, confidence=0.9)},
         )
         goal = {"thirst_bucket": "low"}
-        self.assertTrue(_action_advances_goal(action, goal))
+        state: dict[str, object] = {}
+        self.assertTrue(_action_advances_goal(action, state, goal))
 
     def test_does_not_advance_irrelevant_goal(self) -> None:
         action = _make_action(
@@ -125,7 +126,20 @@ class TestActionAdvancesGoal(unittest.TestCase):
             effects={"thirst_delta": EffectEstimate(mean=-0.65, p10=-0.75, p90=-0.55, confidence=0.9)},
         )
         goal = {"hunger_bucket": "low"}
-        self.assertFalse(_action_advances_goal(action, goal))
+        state: dict[str, object] = {}
+        self.assertFalse(_action_advances_goal(action, state, goal))
+
+    def test_skips_already_satisfied_goal(self) -> None:
+        """Goals already satisfied in current state must be skipped."""
+        action = _make_action(
+            "drink",
+            preconditions={},
+            effects={"thirst_delta": EffectEstimate(mean=-0.65, p10=-0.75, p90=-0.55, confidence=0.9)},
+        )
+        goal = {"thirst_bucket": "low"}
+        # State already satisfies the goal — action should not be considered.
+        state: dict[str, object] = {"thirst_bucket": "low"}
+        self.assertFalse(_action_advances_goal(action, state, goal))
 
 
 class TestPlan(unittest.TestCase):

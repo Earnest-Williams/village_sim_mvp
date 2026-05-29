@@ -64,6 +64,8 @@ class ActionConfidence:
     success_rate: float
     death_rate: float
     timeout_rate: float
+    death_trials: int = 0
+    timeout_trials: int = 0
 
 
 # ── Main synthesized action (§12) ─────────────────────────────────────────────
@@ -215,21 +217,13 @@ def update_confidence_after_execution(
         c.failed_trials += 1
 
     c.success_rate = round(c.successful_trials / c.trials, 4)
-    c.death_rate = round(
-        max(
-            0.0,
-            c.death_rate * ((c.trials - 1) / c.trials)
-            + (1.0 / c.trials if death else 0.0),
-        ),
-        4,
-    )
-    c.timeout_rate = round(
-        max(
-            0.0,
-            c.timeout_rate * ((c.trials - 1) / c.trials)
-            + (1.0 / c.trials if timeout else 0.0),
-        ),
-        4,
-    )
+
+    if death:
+        c.death_trials += 1
+    if timeout:
+        c.timeout_trials += 1
+
+    c.death_rate = round(c.death_trials / c.trials, 4)
+    c.timeout_rate = round(c.timeout_trials / c.trials, 4)
 
     promote_action(action)  # re-evaluate lifecycle after each update

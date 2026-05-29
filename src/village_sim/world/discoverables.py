@@ -12,6 +12,11 @@ from enum import StrEnum
 from typing import Protocol
 
 
+# ── Constants ─────────────────────────────────────────────────────────────────
+
+_INFINITE_AMOUNT_THRESHOLD: float = 9999.0
+"""Sources with max_amount at or above this value are treated as inexhaustible."""
+
 # ── Discoverable kind (§23) ───────────────────────────────────────────────────
 
 
@@ -248,7 +253,7 @@ def exploit_discoverable(
         return False
 
     # Infinite sources (e.g. spring) never deplete.
-    if item.max_amount < 9999.0:
+    if item.max_amount < _INFINITE_AMOUNT_THRESHOLD:
         item.amount = max(0.0, item.amount - 1.0)
 
     return True
