@@ -111,7 +111,7 @@ The code is intentionally explicit and data-oriented. It avoids engine object gr
 
 ## Discoverables and synthesized actions
 
-The live simulation can optionally seed two canonical discoverables with
+The live simulation can optionally seed three canonical discoverables with
 `--discoverables`:
 
 ```bash
@@ -122,6 +122,8 @@ PYTHONPATH=src python -m village_sim --seed 1 --days 2 --width 32 --height 32 --
   thirst and does not deplete the spring.
 - `berry_bush_001` is a berry bush at `(20, 18)`. Exploiting it reduces hunger
   and consumes one unit from the bush until daily regrowth replenishes it.
+- `cave_001` is a cave at `(8, 24)`. Exploiting it reduces cold stress
+  without depleting the cave.
 - Discoverable sightings are stored in a separate ID-indexed discoverable memory.
 - Successful or failed discoverable exploitation is recorded as a trajectory and
   fed to the orchestrator. Focused known-target travel segments can also be

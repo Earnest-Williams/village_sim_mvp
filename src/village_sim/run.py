@@ -32,7 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--discoverables",
         action="store_true",
-        help="seed the live world with spring_001 and berry_bush_001",
+        help="seed the live world with spring_001, berry_bush_001, and cave_001",
     )
     parser.add_argument(
         "--goap",
