@@ -94,9 +94,9 @@ def _synthesize_spring_exploit_actions(sim: Simulation) -> None:
 
 
 def _synthesize_spring_travel_actions(sim: Simulation) -> None:
-    executor = PlanExecutor(sim)
     action = _seed_pathfinder_action("spring_001", "freshwater_spring")
     for _ in range(10):
+        executor = PlanExecutor(sim)
         sim.agent.position = Position(0, 0)
         sim.agent.thirst = 0.1
         sim.agent.hunger = 0.1
@@ -200,6 +200,21 @@ class TestGoapEndToEnd(unittest.TestCase):
         self.assertLess(sim.agent.thirst, 0.9)
         self.assertGreater(len(sim.recorded_trajectories), before_trajectory_count)
         self.assertGreater(travel_action.confidence.trials, previous_trials)
+
+    def test_goap_step_keeps_awake_ticks_aligned_with_elapsed_ticks(self) -> None:
+        sim = _make_sim()
+        _remember_discoverable(sim, Position(12, 12))
+        _synthesize_spring_exploit_actions(sim)
+        _synthesize_spring_travel_actions(sim)
+
+        sim.agent.position = Position(0, 0)
+        sim.agent.thirst = 0.9
+        start_tick = sim.tick
+        start_awake_ticks = sim.agent.awake_ticks
+
+        sim.step()
+
+        self.assertEqual(sim.agent.awake_ticks - start_awake_ticks, sim.tick - start_tick)
 
     def test_action_library_round_trips_travel_payloads(self) -> None:
         sim = _make_sim()

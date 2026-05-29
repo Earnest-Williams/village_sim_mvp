@@ -91,6 +91,7 @@ class PlanExecutor:
 
     def __init__(self, sim: _SimulationSurface) -> None:
         self._sim = sim
+        self._needs_updated_tick: int | None = None
 
     def execute_step(self, step: PlanStep) -> ExecutionResult:
         payload = step.action.execution_payload
@@ -149,20 +150,23 @@ class PlanExecutor:
 
         max_ticks = self._max_pathfinder_ticks(step, target)
         timed_out = False
+        steps_taken = 0
         while _chebyshev(sim.agent.position, Position(target.x, target.y)) > 1:
-            if sim.tick - start_tick >= max_ticks:
+            if steps_taken >= max_ticks:
                 timed_out = True
                 break
             next_position = _choose_greedy_step(sim.world, sim.agent.position, target)
             if next_position is None:
                 break
+            if steps_taken > 0:
+                sim.tick += 1
+                clock = clock_from_tick(sim.tick, sim.config)
+                sim.world.step_environment(sim.rng, sim.config, clock.tick_of_day)
             sim.agent.position = next_position
             sim.agent.distance_walked += 1
             sim.agent.current_action = ActionKind.MOVE
-            sim.tick += 1
-            clock = clock_from_tick(sim.tick, sim.config)
-            sim.world.step_environment(sim.rng, sim.config, clock.tick_of_day)
-            update_needs(sim.agent, sim.config)
+            self._update_needs_once_for_current_tick()
+            steps_taken += 1
             if not sim.agent.alive:
                 break
 
@@ -225,6 +229,7 @@ class PlanExecutor:
                 message="scripted primitive did not exploit a discoverable",
             )
 
+        self._update_needs_once_for_current_tick()
         sim.advance_interaction_ticks(interaction_ticks)
         if sim.tick < sim.config.max_ticks():
             sim.tick += 1
@@ -282,6 +287,13 @@ class PlanExecutor:
         model = step.action.cost_model
         expected = model.base_ticks + model.distance_weight * float(distance)
         return max(8, int(expected * 4.0) + 16)
+
+    def _update_needs_once_for_current_tick(self) -> None:
+        sim = self._sim
+        if self._needs_updated_tick == sim.tick:
+            return
+        update_needs(sim.agent, sim.config)
+        self._needs_updated_tick = sim.tick
 
 
 def _matches_required_type(target: Discoverable, required_type: str | None) -> bool:

@@ -369,6 +369,7 @@ class Simulation:
         if not steps:
             return []
 
+        start_tick = self.tick
         executor = PlanExecutor(self)
         results: list[ExecutionResult] = []
         for step in steps:
@@ -388,6 +389,8 @@ class Simulation:
                     self.action_library.add(action)
             if not result.success or result.death or result.timeout:
                 break
+        if self.tick > start_tick:
+            self.tick -= 1
         return results
 
     def _urgent_goap_goal(self) -> dict[str, FactValue] | None:
