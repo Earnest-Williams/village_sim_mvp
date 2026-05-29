@@ -359,7 +359,7 @@ class Simulation:
         for action in self.orchestrator.synthesize_all():
             self.action_library.add(action)
 
-        if item.kind is DiscoverableKind.CAVE:
+        if item.kind is DiscoverableKind.CAVE and success:
             self._log("action", f"sheltered at {item.discoverable_id}")
         self._log("action", f"exploit {item.discoverable_id} {event_name}")
         return item.interaction_ticks
@@ -402,6 +402,8 @@ class Simulation:
                 self._log("weather", "cold rain")
             elif weather.cold_reason == "night_rain":
                 self._log("weather", "cold night rain")
+            elif weather.cold_reason == "day":
+                self._log("weather", "cold day")
         self._last_feels_cold = weather.feels_cold
 
     def _log_cold_status_transition(self) -> None:

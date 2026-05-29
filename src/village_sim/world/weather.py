@@ -7,7 +7,7 @@ from typing import Literal
 
 from village_sim.core.config import SimConfig
 
-ColdReason = Literal["none", "night", "rain", "night_rain"]
+ColdReason = Literal["none", "night", "rain", "night_rain", "day"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +42,8 @@ def make_weather_state(
             cold_reason = "night"
         elif is_raining:
             cold_reason = "rain"
+        else:
+            cold_reason = "day"
     return WeatherState(
         is_raining=is_raining,
         temperature_c=temperature_c,

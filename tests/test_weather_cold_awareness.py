@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 from village_sim.agent.needs import update_needs
 from village_sim.agent.perception import perceive
@@ -50,6 +51,14 @@ class TestWeatherColdAwareness(unittest.TestCase):
         )
         self.assertTrue(cold_rain.feels_cold)
         self.assertEqual(cold_rain.cold_reason, "rain")
+
+        cold_day = make_weather_state(
+            is_raining=False,
+            is_night=False,
+            config=SimConfig(day_temperature_c=4.0, cold_temperature_threshold_c=5.0),
+        )
+        self.assertTrue(cold_day.feels_cold)
+        self.assertEqual(cold_day.cold_reason, "day")
 
         night_rain = make_weather_state(is_raining=True, is_night=True, config=config)
         self.assertTrue(night_rain.feels_cold)
@@ -136,6 +145,42 @@ class TestWeatherColdAwareness(unittest.TestCase):
         messages = [event.message for event in sim.events if event.kind == "action"]
         self.assertIn("seeking shelter at cave_001", messages)
         self.assertIn("sheltered at cave_001", messages)
+
+    def test_failed_cave_exploit_does_not_log_sheltered_event(self) -> None:
+        config = SimConfig(enable_initial_discoverables=True)
+        sim = Simulation(config)
+        sim.agent.position = _cave_position(sim)
+        sim.agent.cold_stress = 0.9
+        clock = clock_from_tick(sim.tick, config)
+        observation = perceive(
+            sim.world,
+            sim.agent.position,
+            clock,
+            config,
+            sim.current_weather,
+            sim._agent_is_sheltered(),
+        )
+
+        with patch("village_sim.sim.engine.exploit_discoverable", return_value=False):
+            sim.record_discoverable_exploitation(clock, observation)
+
+        messages = [event.message for event in sim.events if event.kind == "action"]
+        self.assertNotIn("sheltered at cave_001", messages)
+        self.assertIn("exploit cave_001 failed", messages)
+
+    def test_cold_day_transition_logs_weather_event(self) -> None:
+        config = SimConfig(day_temperature_c=4.0, cold_temperature_threshold_c=5.0)
+        sim = Simulation(config)
+        sim.events.clear()
+        sim._last_feels_cold = False
+        weather = make_weather_state(is_raining=False, is_night=False, config=config)
+
+        sim._log_weather_transition(weather)
+
+        self.assertIn(
+            "cold day",
+            [event.message for event in sim.events if event.kind == "weather"],
+        )
 
     def test_snapshots_and_replay_include_cold_fields(self) -> None:
         config = SimConfig(enable_initial_discoverables=True)
