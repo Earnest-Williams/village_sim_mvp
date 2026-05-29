@@ -124,9 +124,45 @@ PYTHONPATH=src python -m village_sim --seed 1 --days 2 --width 32 --height 32 --
   and consumes one unit from the bush until daily regrowth replenishes it.
 - Discoverable sightings are stored in a separate ID-indexed discoverable memory.
 - Successful or failed discoverable exploitation is recorded as a trajectory and
-  fed to the orchestrator. General movement trajectories are not recorded yet.
-- Repeated successful trajectories can synthesize in-memory instance and template
-  actions for the flat GOAP selector. The current GOAP planner is a flat
-  applicable-action selector, not a full tree search.
-- Synthesized actions still carry payload IDs for future policy execution. Full
-  RL policy execution is not implemented in the runtime loop yet.
+  fed to the orchestrator. Focused known-target travel segments can also be
+  recorded when a pathfinder run reaches a remembered discoverable.
+- Repeated successful trajectories synthesize in-memory instance and template
+  actions, including both exploit actions and known-target travel actions.
+
+## GOAP chaining status
+
+Enable live GOAP control with `--goap` after seeding discoverables:
+
+```bash
+PYTHONPATH=src python -m village_sim --seed 1 --days 2 --width 32 --height 32 --discoverables --goap --print-map
+```
+
+Action libraries can be persisted and reused across runs:
+
+```bash
+PYTHONPATH=src python -m village_sim --seed 1 --days 2 --width 32 --height 32 --discoverables --goap --action-library-out /tmp/village_actions.json
+PYTHONPATH=src python -m village_sim --seed 2 --days 2 --width 32 --height 32 --discoverables --goap --action-library-in /tmp/village_actions.json
+```
+
+Current supported chain:
+
+```text
+MoveToKnownDiscoverable -> ExploitDiscoverable
+```
+
+Current executor types:
+
+- `PATHFINDER`: deterministic greedy movement toward a bound discoverable target.
+- `SCRIPTED_PRIMITIVE`: currently used for discoverable exploitation.
+- `RL_POLICY`: payload references remain serializable action metadata; neural RL
+  policy execution is not implemented yet.
+
+Current limitations:
+
+- No neural RL or model-free RL training yet.
+- The pathfinder is greedy and deterministic, not full A*.
+- The planner is a bounded forward search, not a full production planner.
+- Travel actions are still induced from controlled/repeated trajectories.
+- Social teaching is not implemented yet.
+- The existing utility survival policy remains the fallback when GOAP has no
+  applicable plan or a plan fails.
