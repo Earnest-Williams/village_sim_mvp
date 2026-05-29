@@ -38,6 +38,7 @@ class TestInitialDiscoverablesRuntime(unittest.TestCase):
 
         self.assertIn("spring_001", sim.world.discoverables)
         self.assertIn("berry_bush_001", sim.world.discoverables)
+        self.assertIn("cave_001", sim.world.discoverables)
 
     def test_default_config_does_not_seed_canonical_discoverables(self) -> None:
         config = SimConfig(width=32, height=32, max_days=1, seed=11)
@@ -49,8 +50,10 @@ class TestInitialDiscoverablesRuntime(unittest.TestCase):
         first = make_initial_discoverables()
         second = make_initial_discoverables()
         first["berry_bush_001"].amount = 0.0
+        first["cave_001"].amount = 0.0
 
         self.assertEqual(second["berry_bush_001"].amount, 4.0)
+        self.assertEqual(second["cave_001"].amount, 9999.0)
 
 
 class TestDiscoverableMemoryRuntime(unittest.TestCase):
