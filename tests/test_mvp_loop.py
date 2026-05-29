@@ -6,7 +6,7 @@ import unittest
 
 from village_sim.core.types import PrimitiveAction
 from village_sim.goap.planner import plan
-from village_sim.orchestrator.action_model import ActionLifecycle
+from village_sim.orchestrator.action_model import ActionLifecycle, ActionScope
 from village_sim.orchestrator.orchestrator import Orchestrator
 from village_sim.orchestrator.symbolic import FactValue
 from village_sim.orchestrator.trajectory import (
@@ -85,6 +85,13 @@ class TestMVPLoop(unittest.TestCase):
         action = actions[0]
         self.assertIn("at_discoverable", action.preconditions)
         self.assertEqual(action.preconditions["at_discoverable"], True)
+
+    def test_instance_action_requires_specific_target_id(self) -> None:
+        actions = self.orchestrator.synthesize_all()
+        instance_action = next(
+            action for action in actions if action.scope is ActionScope.INSTANCE
+        )
+        self.assertEqual(instance_action.preconditions["target_id"], "spring_001")
 
     def test_synthesized_action_lifecycle_is_candidate(self) -> None:
         actions = self.orchestrator.synthesize_all()

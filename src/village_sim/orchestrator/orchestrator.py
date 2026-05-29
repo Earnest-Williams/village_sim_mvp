@@ -167,6 +167,9 @@ class Orchestrator:
         action_suffix = _action_suffix(target_type, target_id, scope)
         action_id = f"action_exploit_{action_suffix}_v1"
         policy_id = f"policy_exploit_{target_type}_v1"
+        action_preconditions = dict(preconditions)
+        if scope is ActionScope.INSTANCE:
+            action_preconditions["target_id"] = target_id
         target_binding = (
             TargetBinding(mode="resource_id", resource_id=target_id)
             if scope is ActionScope.INSTANCE
@@ -179,7 +182,7 @@ class Orchestrator:
             display_name=f"Exploit {display_target.replace('_', ' ')}",
             scope=scope,
             lifecycle=ActionLifecycle.CANDIDATE,
-            preconditions=dict(preconditions),
+            preconditions=action_preconditions,
             soft_preconditions=dict(soft_preconditions),
             effects=dict(effects),
             side_effects={},
@@ -214,6 +217,6 @@ def _action_suffix(target_type: str, target_id: str, scope: ActionScope) -> str:
     if target_id.startswith(f"{target_type}_"):
         return target_id
     target_parts = target_id.rsplit("_", maxsplit=1)
-    if len(target_parts) == 2:
+    if len(target_parts) == 2 and target_parts[1].isdigit():
         return f"{target_type}_{target_parts[1]}"
-    return f"{target_type}_{target_id}"
+    return target_id
