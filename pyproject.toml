@@ -12,8 +12,12 @@ authors = [{ name = "Earnest Williams" }]
 license = { text = "MIT" }
 dependencies = []
 
+[project.optional-dependencies]
+gui = ["wxPython>=4.2"]
+
 [project.scripts]
 village-sim = "village_sim.run:main"
+village-sim-gui = "village_sim.view.wx_view:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
