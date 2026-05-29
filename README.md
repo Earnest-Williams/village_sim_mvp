@@ -63,6 +63,8 @@ or
 village-sim-gui
 ```
 
+In the GUI, enable **Update map every tick** to animate the map and set **Tick delay (ms)** to control simulation speed.
+
 ## Install editable
 
 ```bash
