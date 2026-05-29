@@ -55,14 +55,17 @@ def _action_advances_goal(
     state: Mapping[str, FactValue],
     goal: Mapping[str, FactValue],
 ) -> bool:
-    """True if at least one effect changes state toward an unsatisfied goal."""
-    after = _apply_action_effects(state, action, goal)
-    if after == dict(state):
-        return False
-    before_score = _goal_match_count(state, goal)
-    after_score = _goal_match_count(after, goal)
-    if after_score > before_score:
-        return True
+    """True if at least one effect moves toward an unsatisfied goal."""
+    for goal_fact, goal_value in goal.items():
+        if state.get(goal_fact) == goal_value:
+            continue  # already satisfied – skip
+        need_prefix = goal_fact.replace("_bucket", "")
+        delta_key = f"{need_prefix}_delta"
+        estimate = action.effects.get(delta_key)
+        if estimate is not None and goal_value in ("low", "medium"):
+            if estimate.mean < 0.0:
+                return True
+    # Allow symbolic-state changes that enable subsequent steps in a multi-step plan.
     for fact, value in action.symbolic_effects.items():
         if state.get(fact) != value:
             return True
@@ -179,17 +182,6 @@ def _goal_satisfied(
         if state.get(fact) != value:
             return False
     return True
-
-
-def _goal_match_count(
-    state: Mapping[str, FactValue],
-    goal: Mapping[str, FactValue],
-) -> int:
-    matches = 0
-    for fact, value in goal.items():
-        if state.get(fact) == value:
-            matches += 1
-    return matches
 
 
 def _state_signature(
