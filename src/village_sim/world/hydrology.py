@@ -22,9 +22,9 @@ def step_hydrology(
 
     raining: bool = rng.random() < config.rain_chance_per_tick
     if raining:
-        for index in range(len(water)):
-            if TerrainKind(terrain[index]) is not TerrainKind.ROCK:
-                water[index] = min(2.0, water[index] + config.rain_amount)
+        for rain_index in range(len(water)):
+            if TerrainKind(terrain[rain_index]) is not TerrainKind.ROCK:
+                water[rain_index] = min(2.0, water[rain_index] + config.rain_amount)
 
     delta: list[float] = [0.0 for _ in water]
     for position in iter_positions(width, height):
@@ -38,7 +38,9 @@ def step_hydrology(
         best_neighbor_height: float = current_height
         for neighbor in iter_neighbor_positions(width, height, position, False):
             neighbor_index: int = index_of(width, neighbor)
-            neighbor_height: float = height_map[neighbor_index] + water[neighbor_index] * 0.025
+            neighbor_height: float = (
+                height_map[neighbor_index] + water[neighbor_index] * 0.025
+            )
             if neighbor_height < best_neighbor_height:
                 best_neighbor_height = neighbor_height
                 best_neighbor_index = neighbor_index
@@ -47,7 +49,10 @@ def step_hydrology(
             continue
 
         height_drop: float = current_height - best_neighbor_height
-        flow: float = min(amount, amount * config.downhill_flow_fraction * max(0.20, height_drop * 12.0))
+        flow: float = min(
+            amount,
+            amount * config.downhill_flow_fraction * max(0.20, height_drop * 12.0),
+        )
         if flow <= 0.0:
             continue
         delta[index] -= flow

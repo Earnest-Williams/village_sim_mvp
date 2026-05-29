@@ -15,13 +15,19 @@ from village_sim.orchestrator.action_model import (
     TargetBinding,
 )
 from village_sim.orchestrator.induction import EffectEstimate
-from village_sim.goap.planner import _action_advances_goal, _action_applicable, _expected_cost, plan
+from village_sim.orchestrator.symbolic import FactValue
+from village_sim.goap.planner import (
+    _action_advances_goal,
+    _action_applicable,
+    _expected_cost,
+    plan,
+)
 
 
 def _make_action(
     action_id: str,
-    preconditions: dict,
-    effects: dict,
+    preconditions: dict[str, FactValue],
+    effects: dict[str, EffectEstimate],
     base_ticks: float = 10.0,
     success_rate: float = 0.9,
     lifecycle: ActionLifecycle = ActionLifecycle.TRUSTED,
@@ -65,9 +71,13 @@ class TestActionApplicable(unittest.TestCase):
         action = _make_action(
             "drink",
             preconditions={"at_discoverable": True, "target_type": "freshwater_spring"},
-            effects={"thirst_delta": EffectEstimate(mean=-0.65, p10=-0.75, p90=-0.55, confidence=0.9)},
+            effects={
+                "thirst_delta": EffectEstimate(
+                    mean=-0.65, p10=-0.75, p90=-0.55, confidence=0.9
+                )
+            },
         )
-        state = {
+        state: dict[str, FactValue] = {
             "at_discoverable": True,
             "target_type": "freshwater_spring",
             "thirst_bucket": "high",
@@ -78,9 +88,13 @@ class TestActionApplicable(unittest.TestCase):
         action = _make_action(
             "drink",
             preconditions={"at_discoverable": True},
-            effects={"thirst_delta": EffectEstimate(mean=-0.65, p10=-0.75, p90=-0.55, confidence=0.9)},
+            effects={
+                "thirst_delta": EffectEstimate(
+                    mean=-0.65, p10=-0.75, p90=-0.55, confidence=0.9
+                )
+            },
         )
-        state = {"at_discoverable": False}
+        state: dict[str, FactValue] = {"at_discoverable": False}
         self.assertFalse(_action_applicable(action, state))
 
 
@@ -104,7 +118,9 @@ class TestExpectedCost(unittest.TestCase):
 
     def test_fatigue_weight_increases_cost(self) -> None:
         no_fatigue = _make_action("a", preconditions={}, effects={}, fatigue_weight=0.0)
-        with_fatigue = _make_action("b", preconditions={}, effects={}, fatigue_weight=1.0)
+        with_fatigue = _make_action(
+            "b", preconditions={}, effects={}, fatigue_weight=1.0
+        )
         self.assertLess(_expected_cost(no_fatigue), _expected_cost(with_fatigue))
 
 
@@ -113,20 +129,28 @@ class TestActionAdvancesGoal(unittest.TestCase):
         action = _make_action(
             "drink",
             preconditions={},
-            effects={"thirst_delta": EffectEstimate(mean=-0.65, p10=-0.75, p90=-0.55, confidence=0.9)},
+            effects={
+                "thirst_delta": EffectEstimate(
+                    mean=-0.65, p10=-0.75, p90=-0.55, confidence=0.9
+                )
+            },
         )
         goal = {"thirst_bucket": "low"}
-        state: dict[str, object] = {}
+        state: dict[str, FactValue] = {}
         self.assertTrue(_action_advances_goal(action, state, goal))
 
     def test_does_not_advance_irrelevant_goal(self) -> None:
         action = _make_action(
             "drink",
             preconditions={},
-            effects={"thirst_delta": EffectEstimate(mean=-0.65, p10=-0.75, p90=-0.55, confidence=0.9)},
+            effects={
+                "thirst_delta": EffectEstimate(
+                    mean=-0.65, p10=-0.75, p90=-0.55, confidence=0.9
+                )
+            },
         )
         goal = {"hunger_bucket": "low"}
-        state: dict[str, object] = {}
+        state: dict[str, FactValue] = {}
         self.assertFalse(_action_advances_goal(action, state, goal))
 
     def test_skips_already_satisfied_goal(self) -> None:
@@ -134,11 +158,15 @@ class TestActionAdvancesGoal(unittest.TestCase):
         action = _make_action(
             "drink",
             preconditions={},
-            effects={"thirst_delta": EffectEstimate(mean=-0.65, p10=-0.75, p90=-0.55, confidence=0.9)},
+            effects={
+                "thirst_delta": EffectEstimate(
+                    mean=-0.65, p10=-0.75, p90=-0.55, confidence=0.9
+                )
+            },
         )
         goal = {"thirst_bucket": "low"}
         # State already satisfies the goal — action should not be considered.
-        state: dict[str, object] = {"thirst_bucket": "low"}
+        state: dict[str, FactValue] = {"thirst_bucket": "low"}
         self.assertFalse(_action_advances_goal(action, state, goal))
 
 
@@ -147,14 +175,22 @@ class TestPlan(unittest.TestCase):
         cheap = _make_action(
             "drink_cheap",
             preconditions={"at_discoverable": True},
-            effects={"thirst_delta": EffectEstimate(mean=-0.65, p10=-0.75, p90=-0.55, confidence=0.9)},
+            effects={
+                "thirst_delta": EffectEstimate(
+                    mean=-0.65, p10=-0.75, p90=-0.55, confidence=0.9
+                )
+            },
             base_ticks=5.0,
             success_rate=0.95,
         )
         expensive = _make_action(
             "drink_expensive",
             preconditions={"at_discoverable": True},
-            effects={"thirst_delta": EffectEstimate(mean=-0.65, p10=-0.75, p90=-0.55, confidence=0.9)},
+            effects={
+                "thirst_delta": EffectEstimate(
+                    mean=-0.65, p10=-0.75, p90=-0.55, confidence=0.9
+                )
+            },
             base_ticks=20.0,
             success_rate=0.95,
         )
@@ -169,7 +205,11 @@ class TestPlan(unittest.TestCase):
         deprecated = _make_action(
             "old_drink",
             preconditions={"at_discoverable": True},
-            effects={"thirst_delta": EffectEstimate(mean=-0.65, p10=-0.75, p90=-0.55, confidence=0.9)},
+            effects={
+                "thirst_delta": EffectEstimate(
+                    mean=-0.65, p10=-0.75, p90=-0.55, confidence=0.9
+                )
+            },
             lifecycle=ActionLifecycle.DEPRECATED,
         )
         state = {"at_discoverable": True}
@@ -182,14 +222,18 @@ class TestPlan(unittest.TestCase):
         action = _make_action(
             "drink",
             preconditions={"at_discoverable": True},
-            effects={"thirst_delta": EffectEstimate(mean=-0.65, p10=-0.75, p90=-0.55, confidence=0.9)},
+            effects={
+                "thirst_delta": EffectEstimate(
+                    mean=-0.65, p10=-0.75, p90=-0.55, confidence=0.9
+                )
+            },
         )
-        state = {}  # at_discoverable not set
+        state: dict[str, FactValue] = {}  # at_discoverable not set
         goal = {"thirst_bucket": "low"}
 
         steps = plan(state, goal, [action])
         self.assertEqual(steps, [])
 
+
 if __name__ == "__main__":
     unittest.main()
-

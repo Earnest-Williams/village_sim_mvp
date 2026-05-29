@@ -9,11 +9,19 @@ from village_sim.core.types import Position, ResourceKind, ResourceSighting
 
 # Re-export discoverable memory types so orchestrator/symbolic.py can import
 # them from agent.memory without circular dependencies.
-from village_sim.world.discoverables import (  # noqa: F401
+from village_sim.world.discoverables import (
     DiscoverableAgentMemory,
     DiscoverableMemory,
     update_discoverable_memory,
 )
+
+__all__ = [
+    "AgentMemory",
+    "DiscoverableAgentMemory",
+    "DiscoverableMemory",
+    "ResourceMemory",
+    "update_discoverable_memory",
+]
 
 
 @dataclass(slots=True)
@@ -40,7 +48,9 @@ class ResourceMemory:
             decay = age_days * config.food_memory_decay_per_day
         reliability_bonus: float = min(0.25, self.successful_uses * 0.04)
         failure_penalty: float = min(0.45, self.failed_uses * 0.08)
-        return max(0.0, min(1.0, self.confidence + reliability_bonus - failure_penalty - decay))
+        return max(
+            0.0, min(1.0, self.confidence + reliability_bonus - failure_penalty - decay)
+        )
 
 
 @dataclass(slots=True)
@@ -76,7 +86,9 @@ class AgentMemory:
         )
         return True
 
-    def mark_success(self, kind: ResourceKind, position: Position, tick: int, amount: float) -> None:
+    def mark_success(
+        self, kind: ResourceKind, position: Position, tick: int, amount: float
+    ) -> None:
         memory: ResourceMemory | None = self._find(kind, position)
         if memory is None:
             self._lookup[_key(kind, position)] = len(self.resource_memories)

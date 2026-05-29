@@ -52,7 +52,9 @@ class Simulation:
             return
 
         clock: SimClock = clock_from_tick(self.tick, self.config)
-        raining: bool = self.world.step_environment(self.rng, self.config, clock.tick_of_day)
+        raining: bool = self.world.step_environment(
+            self.rng, self.config, clock.tick_of_day
+        )
         if raining and self.tick % 12 == 0:
             self._log("weather", "rain fell")
 
@@ -110,7 +112,9 @@ class Simulation:
             goal=self.agent.current_goal.value,
             action=self.agent.current_action.value,
         )
-        ascii_map: str | None = render_ascii_map(self.world, self.agent) if include_ascii else None
+        ascii_map: str | None = (
+            render_ascii_map(self.world, self.agent) if include_ascii else None
+        )
         return WorldSnapshot(
             tick=self.tick,
             day=clock.day,
@@ -121,12 +125,13 @@ class Simulation:
         )
 
     def _step_agent(self, clock: SimClock) -> None:
-        assert self.agent.alive
         self.agent.ensure_visit_buffer(self.world.width * self.world.height)
         position_index: int = index_of(self.world.width, self.agent.position)
         self.agent.visited_counts[position_index] += 1
 
-        observation: Observation = perceive(self.world, self.agent.position, clock, self.config)
+        observation: Observation = perceive(
+            self.world, self.agent.position, clock, self.config
+        )
         for sighting in observation.all_sightings():
             is_new: bool = self.memory.observe(sighting, self.tick)
             if is_new:
@@ -146,7 +151,10 @@ class Simulation:
             self.rng,
             self.config,
         )
-        if action_message in {"drank water", "ate food", "slept"} or self.tick % 48 == 0:
+        if (
+            action_message in {"drank water", "ate food", "slept"}
+            or self.tick % 48 == 0
+        ):
             self._log("action", action_message)
 
         update_needs(self.agent, self.config)
@@ -162,7 +170,11 @@ class Simulation:
             TickEvent(
                 tick=self.tick,
                 day=clock.day,
-                actor=f"agent:{self.agent.agent_id}" if hasattr(self, "agent") else "world",
+                actor=(
+                    f"agent:{self.agent.agent_id}"
+                    if hasattr(self, "agent")
+                    else "world"
+                ),
                 kind=kind,
                 message=message,
                 x=self.agent.position.x if hasattr(self, "agent") else -1,
