@@ -18,6 +18,7 @@ class SimResult:
     final_thirst: float
     final_hunger: float
     final_fatigue: float
+    final_cold_stress: float
     water_discoveries: int
     food_discoveries: int
     distance_walked: int

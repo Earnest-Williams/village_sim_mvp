@@ -18,6 +18,7 @@ class NeedState:
     thirst: float
     fatigue: float
     health: float
+    cold_stress: float = 0.0
 
 
 @dataclass(slots=True)

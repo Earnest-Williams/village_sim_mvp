@@ -14,6 +14,7 @@ class AgentSnapshot:
     thirst: float
     hunger: float
     fatigue: float
+    cold_stress: float
     health: float
     alive: bool
     goal: str

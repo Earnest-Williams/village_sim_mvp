@@ -172,7 +172,8 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
             (
                 "Final needs: "
                 f"health={result.final_health:.2f} thirst={result.final_thirst:.2f} "
-                f"hunger={result.final_hunger:.2f} fatigue={result.final_fatigue:.2f}"
+                f"hunger={result.final_hunger:.2f} fatigue={result.final_fatigue:.2f} "
+                f"cold_stress={result.final_cold_stress:.2f}"
             ),
             (
                 "Discoveries: "

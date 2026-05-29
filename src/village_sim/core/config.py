@@ -28,6 +28,13 @@ class SimConfig:
     fatigue_gain_awake: float = 0.006
     fatigue_recovery_sleeping: float = 0.030
 
+    cold_gain_night: float = 0.0015
+    cold_gain_rain: float = 0.0025
+    cold_recovery_daylight: float = 0.0010
+    cold_recovery_shelter: float = 0.0200
+    cold_health_threshold: float = 0.96
+    cold_health_damage: float = 0.015
+
     drink_amount_per_tick: float = 0.24
     eat_amount_per_tick: float = 0.22
 

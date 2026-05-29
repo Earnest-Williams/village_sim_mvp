@@ -16,6 +16,7 @@ class AgentState:
     thirst: float = 0.28
     hunger: float = 0.35
     fatigue: float = 0.20
+    cold_stress: float = 0.0
     health: float = 1.0
     awake_ticks: int = 0
     alive: bool = True
@@ -37,4 +38,5 @@ class AgentState:
         self.thirst = min(1.0, max(0.0, self.thirst))
         self.hunger = min(1.0, max(0.0, self.hunger))
         self.fatigue = min(1.0, max(0.0, self.fatigue))
+        self.cold_stress = min(1.0, max(0.0, self.cold_stress))
         self.health = min(1.0, max(0.0, self.health))

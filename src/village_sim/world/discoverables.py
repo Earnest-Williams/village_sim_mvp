@@ -24,6 +24,7 @@ _INFINITE_AMOUNT_THRESHOLD: float = 9999.0
 class DiscoverableKind(StrEnum):
     FRESHWATER_SPRING = "freshwater_spring"
     BERRY_BUSH = "berry_bush"
+    CAVE = "cave"
 
 
 # ── Core entity (§23) ─────────────────────────────────────────────────────────
@@ -45,7 +46,7 @@ class Discoverable:
     max_amount: float
     regrowth_per_day: float  # added to amount each simulated day
 
-    satisfies_need: str  # "hunger" | "thirst"
+    satisfies_need: str  # "hunger" | "thirst" | "cold_stress"
     need_delta: float  # negative means need decreases (good)
     interaction_ticks: int  # ticks consumed by one exploitation
 
@@ -89,6 +90,24 @@ def make_berry_bush_001() -> Discoverable:
     )
 
 
+def make_cave_001() -> Discoverable:
+    """Create the canonical natural cave shelter instance."""
+    return Discoverable(
+        discoverable_id="cave_001",
+        kind=DiscoverableKind.CAVE,
+        x=8,
+        y=24,
+        visible_name="cave",
+        discovered=False,
+        amount=9999.0,
+        max_amount=9999.0,
+        regrowth_per_day=0.0,
+        satisfies_need="cold_stress",
+        need_delta=-0.50,
+        interaction_ticks=4,
+    )
+
+
 # ── Minimal test-only world (§30) ─────────────────────────────────────────────
 
 
@@ -106,11 +125,12 @@ def make_initial_discoverables() -> dict[str, Discoverable]:
     return {
         "spring_001": make_spring_001(),
         "berry_bush_001": make_berry_bush_001(),
+        "cave_001": make_cave_001(),
     }
 
 
 def make_discoverable_test_world() -> DiscoverableWorld:
-    """Return a deterministic 64×64 world with spring_001 and berry_bush_001."""
+    """Return a deterministic 64×64 world with canonical discoverables."""
     return DiscoverableWorld(
         width=64,
         height=64,
@@ -237,6 +257,7 @@ class HasNeeds(Protocol):
     hunger: float
     thirst: float
     fatigue: float
+    cold_stress: float
     health: float
 
 
@@ -248,6 +269,7 @@ class AgentNeeds:
     thirst: float
     fatigue: float
     health: float
+    cold_stress: float = 0.0
 
 
 def _clamp(value: float) -> float:
@@ -286,6 +308,8 @@ def exploit_discoverable(
         agent_needs.thirst = _clamp(agent_needs.thirst + item.need_delta)
     elif item.satisfies_need == "hunger":
         agent_needs.hunger = _clamp(agent_needs.hunger + item.need_delta)
+    elif item.satisfies_need == "cold_stress":
+        agent_needs.cold_stress = _clamp(agent_needs.cold_stress + item.need_delta)
     else:
         return False
 

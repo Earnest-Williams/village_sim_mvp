@@ -84,6 +84,7 @@ class DeathReason(Enum):
     HUNGER = "hunger"
     EXHAUSTION = "exhaustion"
     EXPOSURE = "exposure"
+    COLD = "cold"
 
 
 @dataclass(frozen=True, slots=True)

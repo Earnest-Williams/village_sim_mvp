@@ -164,7 +164,8 @@ def print_result(result: SimResult) -> None:
         f"health={result.final_health:.2f} "
         f"thirst={result.final_thirst:.2f} "
         f"hunger={result.final_hunger:.2f} "
-        f"fatigue={result.final_fatigue:.2f}"
+        f"fatigue={result.final_fatigue:.2f} "
+        f"cold_stress={result.final_cold_stress:.2f}"
     )
     print(
         "Discoveries: "
