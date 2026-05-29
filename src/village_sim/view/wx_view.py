@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import wx  # type: ignore[import-not-found]
-import wx.richtext as wxrichtext  # type: ignore[import-not-found]
+import wx.stc as wxstc  # type: ignore[import-not-found]
 
 from village_sim.core.config import SimConfig
 from village_sim.orchestrator.action_model import ActionLibrary
@@ -20,11 +20,70 @@ from village_sim.view.ascii_view import (
     RenderedMap,
     render_ascii_map,
     render_map_model,
-    rendered_map_to_text,
 )
-from village_sim.view.scroll import TextViewState, clamp_insertion_point
 
 MAP_UPDATE_INTERVAL_SECONDS: float = 0.05
+
+# Maps each semantic glyph role to an STC style number (1–13).
+# Style 0 is left as the STC default (used for newlines and unknown roles).
+_STC_ROLE_STYLE: dict[str, int] = {
+    "summary": 1,
+    "agent": 2,
+    "agent_sleeping": 3,
+    "water": 4,
+    "broadleaf": 5,
+    "evergreen": 6,
+    "grass": 7,
+    "brush": 8,
+    "wetland": 9,
+    "food": 10,
+    "rock": 11,
+    "cave": 12,
+    "hill": 13,
+}
+
+
+def _build_stc_content(rendered_map: RenderedMap) -> tuple[str, list[tuple[int, int]]]:
+    """Return ``(full_text, style_runs)`` for STC rendering.
+
+    *style_runs* is a list of ``(utf8_byte_count, style_number)`` pairs
+    describing consecutive same-style segments.  Callers apply them with a
+    single ``StartStyling(0)`` followed by one ``SetStyling`` per run — the
+    most efficient path through the STC API because:
+
+    * all text is a single string (one ``SetText`` call), and
+    * consecutive same-role glyphs are merged, minimising style-change ops.
+
+    Multi-byte Unicode characters (e.g. ♣ U+2663 = 3 UTF-8 bytes) are
+    accounted for correctly: every byte in a glyph is assigned the same style.
+    """
+    text_parts: list[str] = []
+    style_runs: list[tuple[int, int]] = []
+    current_style: int = -1
+    current_bytes: int = 0
+
+    def _append(text: str, style: int) -> None:
+        nonlocal current_style, current_bytes
+        text_parts.append(text)
+        byte_len = len(text.encode("utf-8"))
+        if style == current_style:
+            current_bytes += byte_len
+        else:
+            if current_bytes > 0:
+                style_runs.append((current_bytes, current_style))
+            current_style = style
+            current_bytes = byte_len
+
+    summary_style = _STC_ROLE_STYLE["summary"]
+    _append(rendered_map.status + "\n", summary_style)
+    _append(rendered_map.legend + "\n", summary_style)
+    for row in rendered_map.rows:
+        for glyph in row:
+            _append(glyph.char, _STC_ROLE_STYLE.get(glyph.role, 0))
+        _append("\n", 0)
+    if current_bytes > 0:
+        style_runs.append((current_bytes, current_style))
+    return "".join(text_parts), style_runs
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,11 +185,25 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
             size=(-1, 150),
         )
         self.summary_ctrl.SetBackgroundColour(panel.GetBackgroundColour())
-        self.map_ctrl = wxrichtext.RichTextCtrl(
-            panel,
-            style=wx.TE_MULTILINE | wx.TE_READONLY | wx.HSCROLL | wx.TE_DONTWRAP,
-        )
-        self.map_ctrl.SetFont(wx.Font(wx.FontInfo(10).Family(wx.FONTFAMILY_TELETYPE)))
+        self.map_ctrl = wxstc.StyledTextCtrl(panel, style=wx.BORDER_NONE)
+        self.map_ctrl.SetReadOnly(True)
+        self.map_ctrl.SetWrapMode(wxstc.STC_WRAP_NONE)
+        self.map_ctrl.SetScrollWidthTracking(True)
+        self.map_ctrl.SetScrollWidth(1)
+        self.map_ctrl.SetUndoCollection(False)
+        # Hide the blinking caret — this is a display-only control.
+        self.map_ctrl.SetCaretWidth(0)
+        # Remove all editor margins (line numbers, fold marks, etc.).
+        for _margin in range(5):
+            self.map_ctrl.SetMarginWidth(_margin, 0)
+        # Set monospace font on the default style then propagate to all styles.
+        _mono_font = wx.Font(wx.FontInfo(10).Family(wx.FONTFAMILY_TELETYPE))
+        self.map_ctrl.StyleSetFont(wxstc.STC_STYLE_DEFAULT, _mono_font)
+        self.map_ctrl.StyleClearAll()
+        # Assign the role foreground colors.
+        for _role, _style_num in _STC_ROLE_STYLE.items():
+            _color = wx.Colour(ROLE_COLORS.get(_role, "#d0d0d0"))
+            self.map_ctrl.StyleSetForeground(_style_num, _color)
 
         root_sizer.Add(controls_sizer, 0, wx.EXPAND | wx.ALL, 12)
         root_sizer.Add(self.run_button, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
@@ -163,7 +236,7 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
     def on_run(self, _: wx.CommandEvent) -> None:
         self.run_button.Disable()
         self.summary_ctrl.Clear()
-        self.map_ctrl.Clear()
+        self._clear_map_ctrl()
         options: GuiRunOptions = self._collect_options()
 
         def thread_target() -> None:
@@ -352,56 +425,31 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
             return
 
     def _set_colored_map_value(self, rendered_map: RenderedMap) -> None:
-        text: str = rendered_map_to_text(rendered_map)
-        state: TextViewState = self._capture_map_view_state()
-        self.map_ctrl.Freeze()
-        try:
-            self.map_ctrl.Clear()
-            self._write_rich_map_line(rendered_map.status, "summary")
-            self._write_rich_map_line(rendered_map.legend, "summary")
-            for row in rendered_map.rows:
-                for glyph in row:
-                    color_value: str = glyph.fg or ROLE_COLORS.get(
-                        glyph.role, "#d0d0d0"
-                    )
-                    self.map_ctrl.BeginTextColour(wx.Colour(color_value))
-                    self.map_ctrl.WriteText(glyph.char)
-                    self.map_ctrl.EndTextColour()
-                self.map_ctrl.WriteText("\n")
-            self._restore_map_view_state(state, len(text))
-        finally:
-            self.map_ctrl.Thaw()
+        full_text, style_runs = _build_stc_content(rendered_map)
+        first_line: int = self.map_ctrl.GetFirstVisibleLine()
+        x_offset: int = self.map_ctrl.GetXOffset()
+        self.map_ctrl.SetReadOnly(False)
+        self.map_ctrl.SetText(full_text)
+        self.map_ctrl.StartStyling(0)
+        for byte_len, style_num in style_runs:
+            self.map_ctrl.SetStyling(byte_len, style_num)
+        self.map_ctrl.SetFirstVisibleLine(first_line)
+        self.map_ctrl.SetXOffset(x_offset)
+        self.map_ctrl.SetReadOnly(True)
 
     def _set_map_text_preserving_view(self, map_str: str) -> None:
-        state: TextViewState = self._capture_map_view_state()
-        self.map_ctrl.Freeze()
-        try:
-            self.map_ctrl.SetValue(map_str)
-            self._restore_map_view_state(state, len(map_str))
-        finally:
-            self.map_ctrl.Thaw()
+        first_line: int = self.map_ctrl.GetFirstVisibleLine()
+        x_offset: int = self.map_ctrl.GetXOffset()
+        self.map_ctrl.SetReadOnly(False)
+        self.map_ctrl.SetText(map_str)
+        self.map_ctrl.SetFirstVisibleLine(first_line)
+        self.map_ctrl.SetXOffset(x_offset)
+        self.map_ctrl.SetReadOnly(True)
 
-    def _capture_map_view_state(self) -> TextViewState:
-        return TextViewState(
-            horizontal_scroll=self.map_ctrl.GetScrollPos(wx.HORIZONTAL),
-            vertical_scroll=self.map_ctrl.GetScrollPos(wx.VERTICAL),
-            insertion_point=self.map_ctrl.GetInsertionPoint(),
-        )
-
-    def _restore_map_view_state(self, state: TextViewState, text_length: int) -> None:
-        insertion_point: int = clamp_insertion_point(state.insertion_point, text_length)
-        self.map_ctrl.SetInsertionPoint(insertion_point)
-        self.map_ctrl.SetScrollPos(wx.HORIZONTAL, state.horizontal_scroll)
-        self.map_ctrl.SetScrollPos(wx.VERTICAL, state.vertical_scroll)
-        if hasattr(self.map_ctrl, "Scroll"):
-            self.map_ctrl.Scroll(state.horizontal_scroll, state.vertical_scroll)
-
-    def _write_rich_map_line(self, text: str, role: str) -> None:
-        color_value: str = ROLE_COLORS.get(role, "#d0d0d0")
-        self.map_ctrl.BeginTextColour(wx.Colour(color_value))
-        self.map_ctrl.WriteText(text)
-        self.map_ctrl.EndTextColour()
-        self.map_ctrl.WriteText("\n")
+    def _clear_map_ctrl(self) -> None:
+        self.map_ctrl.SetReadOnly(False)
+        self.map_ctrl.ClearAll()
+        self.map_ctrl.SetReadOnly(True)
 
     def _enable_run_button(self) -> None:
         if not self._frame_is_alive():
