@@ -52,7 +52,7 @@ class Simulation:
             return
 
         clock: SimClock = clock_from_tick(self.tick, self.config)
-        raining: bool = self.world.step_environment(self.rng, self.config)
+        raining: bool = self.world.step_environment(self.rng, self.config, clock.tick_of_day)
         if raining and self.tick % 12 == 0:
             self._log("weather", "rain fell")
 

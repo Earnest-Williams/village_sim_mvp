@@ -7,6 +7,14 @@ from dataclasses import dataclass, field
 from village_sim.core.config import SimConfig
 from village_sim.core.types import Position, ResourceKind, ResourceSighting
 
+# Re-export discoverable memory types so orchestrator/symbolic.py can import
+# them from agent.memory without circular dependencies.
+from village_sim.world.discoverables import (  # noqa: F401
+    DiscoverableAgentMemory,
+    DiscoverableMemory,
+    update_discoverable_memory,
+)
+
 
 @dataclass(slots=True)
 class ResourceMemory:

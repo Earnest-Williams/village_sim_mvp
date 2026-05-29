@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from village_sim.core.config import SimConfig
 from village_sim.core.types import Position, TerrainKind
+from village_sim.world.discoverables import Discoverable, update_discoverables_daily
 from village_sim.world.grid import index_of, iter_neighbor_positions, iter_positions
 from village_sim.world.hydrology import step_hydrology
 from village_sim.world.resources import initialize_food, initialize_water, regrow_food
@@ -28,6 +29,7 @@ class World:
     water: list[float]
     food: list[float]
     food_capacity: list[float]
+    discoverables: dict[str, Discoverable] = field(default_factory=dict)
 
     def index(self, position: Position) -> int:
         return index_of(self.width, position)
@@ -75,7 +77,7 @@ class World:
         slope: float = estimate_slope(self.width, self.height, self.height_map, index)
         return walk_cost(self.terrain[index], slope)
 
-    def step_environment(self, rng: random.Random, config: SimConfig) -> bool:
+    def step_environment(self, rng: random.Random, config: SimConfig, tick_of_day: int = -1) -> bool:
         raining: bool = step_hydrology(
             self.width,
             self.height,
@@ -86,6 +88,8 @@ class World:
             config,
         )
         regrow_food(self.width, self.height, self.food, self.food_capacity, config)
+        if tick_of_day == 0:
+            update_discoverables_daily(self)
         return raining
 
     def nearest_drinkable_position(self, position: Position) -> Position | None:
@@ -115,7 +119,11 @@ class World:
         return best_position
 
 
-def generate_world(config: SimConfig, rng: random.Random) -> World:
+def generate_world(
+    config: SimConfig,
+    rng: random.Random,
+    discoverables: dict[str, Discoverable] | None = None,
+) -> World:
     config.validate()
     height_map: list[float] = generate_height_map(config.width, config.height, rng)
     terrain: list[int] = classify_terrain(config.width, config.height, height_map, rng)
@@ -129,6 +137,7 @@ def generate_world(config: SimConfig, rng: random.Random) -> World:
         water=water,
         food=food,
         food_capacity=food_capacity,
+        discoverables=discoverables or {},
     )
 
 
