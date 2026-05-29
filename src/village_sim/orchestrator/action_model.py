@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from village_sim.orchestrator.induction import EffectEstimate
 from village_sim.orchestrator.symbolic import FactValue
@@ -88,12 +89,12 @@ class SynthesizedAction:
     cost_model: CostModel
     confidence: ActionConfidence
     execution_payload: ExecutionPayload
+    symbolic_effects: dict[str, FactValue] = field(
+        default_factory=lambda: dict[str, FactValue]()
+    )
 
     def to_dict(self) -> dict[str, Any]:
-        data = asdict(self)
-        if not isinstance(data, dict):
-            raise TypeError("synthesized action serialization must produce a dict")
-        return data
+        return asdict(self)
 
     def to_json(self, indent: int = 2) -> str:
         return json.dumps(self.to_dict(), indent=indent)
@@ -125,6 +126,7 @@ class SynthesizedAction:
                     **data["execution_payload"]["target_binding"]
                 ),
             ),
+            symbolic_effects=dict(data.get("symbolic_effects", {})),
         )
 
 
@@ -188,13 +190,20 @@ class ActionLibrary:
     @classmethod
     def load(cls, path: Path) -> ActionLibrary:
         library = cls()
-        raw = json.loads(path.read_text())
+        raw: object = json.loads(path.read_text())
         if not isinstance(raw, list):
             raise ValueError("action library file must contain a JSON list")
-        for item in raw:
-            if not isinstance(item, dict):
+        raw_items = cast(list[object], raw)
+        for item in raw_items:
+            if not isinstance(item, Mapping):
                 raise ValueError("each action library entry must be a JSON object")
-            library.add(SynthesizedAction.from_dict(item))
+            item_mapping = cast(Mapping[object, object], item)
+            action_data: dict[str, Any] = {}
+            for key, value in item_mapping.items():
+                if not isinstance(key, str):
+                    raise ValueError("action library entry keys must be strings")
+                action_data[key] = value
+            library.add(SynthesizedAction.from_dict(action_data))
         return library
 
 

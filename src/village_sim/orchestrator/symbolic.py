@@ -10,7 +10,7 @@ from village_sim.agent.memory import DiscoverableAgentMemory
 from village_sim.agent.perception import Observation
 from village_sim.agent.state import AgentState
 from village_sim.core.time import SimClock
-from village_sim.world.discoverables import DiscoverableKind
+from village_sim.world.discoverables import DiscoverableKind, DiscoverableMemory
 
 FactValue = bool | int | float | str
 SymbolicState = dict[str, FactValue]
@@ -28,6 +28,17 @@ def bucket_need(value: float) -> str:
     if value >= 0.30:
         return "medium"
     return "low"
+
+
+def bucket_distance(distance: int) -> str:
+    """Convert a Chebyshev target distance to a symbolic bucket label."""
+    if distance <= 1:
+        return "at"
+    if distance <= 5:
+        return "near"
+    if distance <= 16:
+        return "medium"
+    return "far"
 
 
 # ── Full state predicate extractor (§7) ───────────────────────────────────────
@@ -53,24 +64,25 @@ def extract_symbolic_state(
     if observation.discoverables:
         closest = min(
             observation.discoverables,
-            key=lambda d: (d.x - agent.position.x) ** 2
-            + (d.y - agent.position.y) ** 2,
+            key=lambda d: (d.x - agent.position.x) ** 2 + (d.y - agent.position.y) ** 2,
         )
-        at_disc = (
-            abs(closest.x - agent.position.x) <= 1
-            and abs(closest.y - agent.position.y) <= 1
+        distance = max(
+            abs(closest.x - agent.position.x),
+            abs(closest.y - agent.position.y),
         )
+        at_disc = distance <= 1
         state["at_discoverable"] = at_disc
         state["visible_discoverable"] = True
         state["target_id"] = closest.discoverable_id
         state["target_type"] = str(closest.kind)
         state["target_has_resource"] = closest.amount > 0.0
+        state["has_target_location"] = True
+        state["target_known_x"] = closest.x
+        state["target_known_y"] = closest.y
+        state["distance_to_target_bucket"] = bucket_distance(distance)
+        state["at_known_target"] = at_disc
     else:
-        state["at_discoverable"] = False
-        state["visible_discoverable"] = False
-        state["target_id"] = "none"
-        state["target_type"] = "none"
-        state["target_has_resource"] = False
+        _apply_memory_target_facts(state, agent, disc_memory)
 
     # Memory-derived predicates
     known_water = any(
@@ -85,3 +97,68 @@ def extract_symbolic_state(
     state["known_food"] = known_food
 
     return state
+
+
+def _apply_memory_target_facts(
+    state: SymbolicState,
+    agent: AgentState,
+    disc_memory: DiscoverableAgentMemory,
+) -> None:
+    target = _choose_memory_target(agent, disc_memory)
+    if target is None:
+        state["at_discoverable"] = False
+        state["visible_discoverable"] = False
+        state["target_id"] = "none"
+        state["target_type"] = "none"
+        state["target_has_resource"] = False
+        state["has_target_location"] = False
+        state["target_known_x"] = -1
+        state["target_known_y"] = -1
+        state["distance_to_target_bucket"] = "far"
+        state["at_known_target"] = False
+        return
+
+    distance = max(abs(target.x - agent.position.x), abs(target.y - agent.position.y))
+    at_target = distance <= 1
+    state["at_discoverable"] = False
+    state["visible_discoverable"] = False
+    state["target_id"] = target.discoverable_id
+    state["target_type"] = str(target.kind)
+    state["target_has_resource"] = target.last_known_amount > 0.0
+    state["has_target_location"] = True
+    state["target_known_x"] = target.x
+    state["target_known_y"] = target.y
+    state["distance_to_target_bucket"] = bucket_distance(distance)
+    state["at_known_target"] = at_target
+
+
+def _choose_memory_target(
+    agent: AgentState,
+    disc_memory: DiscoverableAgentMemory,
+) -> DiscoverableMemory | None:
+    preferred_kinds: list[DiscoverableKind] = []
+    if agent.thirst >= agent.hunger:
+        preferred_kinds.extend(
+            [DiscoverableKind.FRESHWATER_SPRING, DiscoverableKind.BERRY_BUSH]
+        )
+    else:
+        preferred_kinds.extend(
+            [DiscoverableKind.BERRY_BUSH, DiscoverableKind.FRESHWATER_SPRING]
+        )
+
+    for kind in preferred_kinds:
+        target = _best_memory_of_kind(disc_memory, kind)
+        if target is not None:
+            return target
+    return None
+
+
+def _best_memory_of_kind(
+    disc_memory: DiscoverableAgentMemory,
+    kind: DiscoverableKind,
+) -> DiscoverableMemory | None:
+    matches = [m for m in disc_memory.discoverables.values() if m.kind is kind]
+    if not matches:
+        return None
+    matches.sort(key=lambda m: (-m.confidence, -m.last_seen_tick, m.discoverable_id))
+    return matches[0]

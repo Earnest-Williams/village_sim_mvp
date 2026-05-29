@@ -13,10 +13,12 @@ from village_sim.agent.state import AgentState
 from village_sim.core.config import SimConfig
 from village_sim.core.time import SimClock, clock_from_tick
 from village_sim.core.types import ActionKind, PrimitiveAction, ResourceKind
+from village_sim.goap.executor import ExecutionResult, PlanExecutor
 from village_sim.goap.planner import PlanStep, plan
 from village_sim.orchestrator.action_model import (
     ActionLibrary,
     ActionLifecycle,
+    update_confidence_after_execution,
 )
 from village_sim.orchestrator.orchestrator import Orchestrator
 from village_sim.orchestrator.snapshotting import make_state_snapshot
@@ -187,6 +189,15 @@ class Simulation:
                 item.discovered = True
             self._log("memory", f"discovered {discoverable_id}")
 
+        if self.config.enable_goap_control:
+            goal = self._urgent_goap_goal()
+            if goal is not None:
+                results = self.execute_goap_plan(goal)
+                if results and all(result.success for result in results):
+                    if not self.agent.alive:
+                        self._log_agent_death()
+                    return
+
         interaction_ticks = self._try_record_discoverable_exploitation(
             clock, observation
         )
@@ -305,6 +316,18 @@ class Simulation:
             if not self.agent.alive:
                 return
 
+    def record_discoverable_exploitation(
+        self,
+        clock: SimClock,
+        observation: Observation,
+    ) -> int:
+        """Record and execute one adjacent discoverable exploitation attempt."""
+        return self._try_record_discoverable_exploitation(clock, observation)
+
+    def advance_interaction_ticks(self, interaction_ticks: int) -> None:
+        """Advance time while an explicit multi-tick interaction is in progress."""
+        self._advance_interaction_ticks(interaction_ticks)
+
     def _should_exploit_discoverable(self, item: Discoverable) -> bool:
         if item.amount <= 0.0:
             return False
@@ -315,11 +338,7 @@ class Simulation:
         return False
 
     def current_goap_plan(self, goal: dict[str, FactValue]) -> list[PlanStep]:
-        """Return flat GOAP candidates from the current live symbolic state.
-
-        TODO: add learned or built-in travel actions before replacing policy with
-        full WalkTo -> Exploit chaining.
-        """
+        """Return a bounded multi-step GOAP plan from the live symbolic state."""
         clock: SimClock = clock_from_tick(self.tick, self.config)
         observation: Observation = perceive(
             self.world,
@@ -339,6 +358,47 @@ class Simulation:
             self.action_library.all_actions(),
             agent_lifecycle_floor=ActionLifecycle.CANDIDATE,
         )
+
+    def execute_goap_plan(
+        self,
+        goal: dict[str, FactValue],
+        max_steps: int = 4,
+    ) -> list[ExecutionResult]:
+        """Plan and execute a synthesized GOAP chain in the live simulation."""
+        steps = self.current_goap_plan(goal)[:max_steps]
+        if not steps:
+            return []
+
+        start_tick = self.tick
+        executor = PlanExecutor(self)
+        results: list[ExecutionResult] = []
+        for step in steps:
+            result = executor.execute_step(step)
+            results.append(result)
+            update_confidence_after_execution(
+                step.action,
+                success=result.success,
+                death=result.death,
+                timeout=result.timeout,
+            )
+            if result.trajectory is not None:
+                if result.trajectory not in self.recorded_trajectories:
+                    self.recorded_trajectories.append(result.trajectory)
+                    self.orchestrator.record(result.trajectory)
+                for action in self.orchestrator.synthesize_all():
+                    self.action_library.add(action)
+            if not result.success or result.death or result.timeout:
+                break
+        if self.tick > start_tick:
+            self.tick -= 1
+        return results
+
+    def _urgent_goap_goal(self) -> dict[str, FactValue] | None:
+        if self.agent.thirst >= 0.60:
+            return {"thirst_bucket": "low"}
+        if self.agent.hunger >= 0.60:
+            return {"hunger_bucket": "low"}
+        return None
 
     def _log_agent_death(self) -> None:
         reason: str = "unknown"

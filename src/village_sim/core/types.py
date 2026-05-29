@@ -69,6 +69,7 @@ class PrimitiveAction(StrEnum):
     MOVE_SOUTH = "move_south"
     MOVE_EAST = "move_east"
     MOVE_WEST = "move_west"
+    MOVE_TO_TARGET = "move_to_target"
     INSPECT = "inspect"
     DRINK = "drink"
     EAT = "eat"

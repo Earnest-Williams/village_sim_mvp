@@ -6,6 +6,7 @@ import argparse
 from pathlib import Path
 
 from village_sim.core.config import SimConfig
+from village_sim.orchestrator.action_model import ActionLibrary
 from village_sim.sim.engine import Simulation
 from village_sim.sim.metrics import SimResult
 from village_sim.sim.replay import write_run_report
@@ -32,6 +33,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--discoverables",
         action="store_true",
         help="seed the live world with spring_001 and berry_bush_001",
+    )
+    parser.add_argument(
+        "--goap",
+        action="store_true",
+        help="enable bounded GOAP control for urgent discoverable needs",
+    )
+    parser.add_argument(
+        "--action-library-in",
+        type=Path,
+        default=None,
+        help="optional JSON action library to load before running",
+    )
+    parser.add_argument(
+        "--action-library-out",
+        type=Path,
+        default=None,
+        help="optional path to save the action library after running",
     )
     parser.add_argument(
         "--local-map-radius",
@@ -78,8 +96,11 @@ def main() -> None:
         max_days=args.days,
         seed=args.seed,
         enable_initial_discoverables=args.discoverables,
+        enable_goap_control=args.goap,
     )
     sim = Simulation(config)
+    if args.action_library_in is not None:
+        sim.action_library = ActionLibrary.load(args.action_library_in)
     result: SimResult = sim.run(snapshot_every=args.snapshot_every)
     print_result(result)
 
@@ -88,6 +109,10 @@ def main() -> None:
             None if args.local_map_radius <= 0 else args.local_map_radius
         )
         print(render_ascii_map(sim.world, sim.agent, radius=radius))
+
+    if args.action_library_out is not None:
+        sim.action_library.save(args.action_library_out)
+        print(f"Wrote action library: {args.action_library_out}")
 
     if args.replay is not None:
         write_run_report(args.replay, config, result, sim.events, sim.snapshots)
@@ -103,6 +128,7 @@ def run_batch(args: argparse.Namespace) -> None:
             max_days=args.days,
             seed=args.seed + offset,
             enable_initial_discoverables=args.discoverables,
+            enable_goap_control=args.goap,
         )
         sim = Simulation(config)
         results.append(sim.run())
