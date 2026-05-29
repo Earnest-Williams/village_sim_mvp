@@ -131,6 +131,29 @@ PYTHONPATH=src python -m village_sim --seed 1 --days 2 --width 32 --height 32 --
 - Repeated successful trajectories synthesize in-memory instance and template
   actions, including both exploit actions and known-target travel actions.
 
+
+### Reading a cold/shelter run
+
+Use a short discoverable GOAP run with replay snapshots to see the existing
+cold-weather and cave-shelter signals:
+
+```bash
+PYTHONPATH=src python -m village_sim --seed 1 --days 3 --discoverables --goap --snapshot-every 12 --replay /tmp/village_replay.json
+```
+
+Representative events and summary lines include:
+
+```text
+weather: cold night
+status: agent is cold
+action: seeking shelter at cave_001
+action: sheltered at cave_001
+Cold/weather: temp_c=...
+```
+
+Replay snapshots include world `temperature_c`, `feels_cold`, `cold_reason`,
+and per-agent `is_sheltered` and `cold_status` fields.
+
 ## GOAP chaining status
 
 Enable live GOAP control with `--goap` after seeding discoverables:

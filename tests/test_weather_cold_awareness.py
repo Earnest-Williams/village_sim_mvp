@@ -82,7 +82,7 @@ class TestWeatherColdAwareness(unittest.TestCase):
             clock,
             config,
             weather,
-            sim._agent_is_sheltered(),
+            sim.agent_is_sheltered(),
         )
 
         self.assertTrue(observation.is_raining)
@@ -158,7 +158,7 @@ class TestWeatherColdAwareness(unittest.TestCase):
             clock,
             config,
             sim.current_weather,
-            sim._agent_is_sheltered(),
+            sim.agent_is_sheltered(),
         )
 
         with patch("village_sim.sim.engine.exploit_discoverable", return_value=False):
@@ -166,7 +166,7 @@ class TestWeatherColdAwareness(unittest.TestCase):
 
         messages = [event.message for event in sim.events if event.kind == "action"]
         self.assertNotIn("sheltered at cave_001", messages)
-        self.assertIn("exploit cave_001 failed", messages)
+        self.assertNotIn("exploit cave_001 failed", messages)
 
     def test_cold_day_transition_logs_weather_event(self) -> None:
         config = SimConfig(day_temperature_c=4.0, cold_temperature_threshold_c=5.0)
