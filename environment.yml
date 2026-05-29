@@ -1,0 +1,8 @@
+# Mamba/Conda environment specification for 'village_sim_mvp'
+# Edit me to add your project's dependencies!
+name: village_sim_mvp
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip

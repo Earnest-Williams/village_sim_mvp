@@ -1,0 +1,131 @@
+"""Command-line runner."""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+from village_sim.core.config import SimConfig
+from village_sim.sim.engine import Simulation
+from village_sim.sim.metrics import SimResult
+from village_sim.sim.replay import write_run_report
+from village_sim.view.ascii_view import render_ascii_map
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run the Village Sim MVP.")
+    parser.add_argument("--seed", type=int, default=1, help="deterministic RNG seed")
+    parser.add_argument("--days", type=int, default=10, help="number of simulated days")
+    parser.add_argument("--width", type=int, default=32, help="world width in cells")
+    parser.add_argument("--height", type=int, default=32, help="world height in cells")
+    parser.add_argument(
+        "--print-map",
+        action="store_true",
+        help="print an ASCII map at the end of the run",
+    )
+    parser.add_argument(
+        "--local-map-radius",
+        type=int,
+        default=0,
+        help="when printing a map, print only this radius around the agent; 0 prints full map",
+    )
+    parser.add_argument(
+        "--snapshot-every",
+        type=int,
+        default=0,
+        help="store ASCII snapshots every N ticks in the replay JSON",
+    )
+    parser.add_argument(
+        "--replay",
+        type=Path,
+        default=None,
+        help="optional path for JSON run report",
+    )
+    parser.add_argument(
+        "--batch",
+        type=int,
+        default=1,
+        help="run N seeds starting from --seed and print aggregate results",
+    )
+    return parser
+
+
+def main() -> None:
+    parser: argparse.ArgumentParser = build_parser()
+    args: argparse.Namespace = parser.parse_args()
+
+    if args.batch > 1:
+        run_batch(args)
+        return
+
+    config = SimConfig(
+        width=args.width,
+        height=args.height,
+        max_days=args.days,
+        seed=args.seed,
+    )
+    sim = Simulation(config)
+    result: SimResult = sim.run(snapshot_every=args.snapshot_every)
+    print_result(result)
+
+    if args.print_map:
+        radius: int | None = None if args.local_map_radius <= 0 else args.local_map_radius
+        print(render_ascii_map(sim.world, sim.agent, radius=radius))
+
+    if args.replay is not None:
+        write_run_report(args.replay, config, result, sim.events, sim.snapshots)
+        print(f"Wrote replay report: {args.replay}")
+
+
+def run_batch(args: argparse.Namespace) -> None:
+    results: list[SimResult] = []
+    for offset in range(args.batch):
+        config = SimConfig(
+            width=args.width,
+            height=args.height,
+            max_days=args.days,
+            seed=args.seed + offset,
+        )
+        sim = Simulation(config)
+        results.append(sim.run())
+
+    survived_count: int = sum(1 for result in results if result.survived)
+    average_days: float = sum(result.days_elapsed for result in results) / float(len(results))
+    average_distance: float = sum(result.distance_walked for result in results) / float(len(results))
+    print(f"Batch runs: {len(results)}")
+    print(f"Survived full duration: {survived_count}/{len(results)}")
+    print(f"Average days elapsed: {average_days:.2f}")
+    print(f"Average distance walked: {average_distance:.1f}")
+    print("seed,days,survived,death,water_sites,food_sites,distance")
+    for result in results:
+        print(
+            f"{result.seed},{result.days_elapsed:.2f},{result.survived},"
+            f"{result.death_reason},{result.remembered_water_sites},"
+            f"{result.remembered_food_sites},{result.distance_walked}"
+        )
+
+
+def print_result(result: SimResult) -> None:
+    print(f"Seed: {result.seed}")
+    print(f"Days elapsed: {result.days_elapsed:.2f}")
+    print(f"Survived: {result.survived}")
+    if result.death_reason is not None:
+        print(f"Death reason: {result.death_reason}")
+    print(
+        "Final needs: "
+        f"health={result.final_health:.2f} "
+        f"thirst={result.final_thirst:.2f} "
+        f"hunger={result.final_hunger:.2f} "
+        f"fatigue={result.final_fatigue:.2f}"
+    )
+    print(
+        "Discoveries: "
+        f"water={result.water_discoveries} food={result.food_discoveries} "
+        f"remembered_water={result.remembered_water_sites} "
+        f"remembered_food={result.remembered_food_sites}"
+    )
+    print(f"Distance walked: {result.distance_walked}")
+
+
+if __name__ == "__main__":
+    main()

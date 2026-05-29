@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "village-sim-mvp"
+version = "0.1.0"
+description = "A stdlib-only, headless-first medieval survival simulation MVP."
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{ name = "Earnest Williams" }]
+license = { text = "MIT" }
+dependencies = []
+
+[project.scripts]
+village-sim = "village_sim.run:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_configs = true
+warn_return_any = true
+warn_unreachable = true
+
+[tool.pyright]
+typeCheckingMode = "strict"
+pythonVersion = "3.12"
+include = ["src", "tests"]
