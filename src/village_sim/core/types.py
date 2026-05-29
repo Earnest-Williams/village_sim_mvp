@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum, IntEnum
+from enum import Enum, IntEnum, StrEnum
 from math import sqrt
 
 
@@ -60,6 +60,20 @@ class ActionKind(Enum):
     EXPLORE = "explore"
     SEARCH = "search"
     IDLE = "idle"
+
+
+class PrimitiveAction(StrEnum):
+    """Primitive RL action vocabulary (§6)."""
+
+    MOVE_NORTH = "move_north"
+    MOVE_SOUTH = "move_south"
+    MOVE_EAST = "move_east"
+    MOVE_WEST = "move_west"
+    INSPECT = "inspect"
+    DRINK = "drink"
+    EAT = "eat"
+    SLEEP = "sleep"
+    WAIT = "wait"
 
 
 class DeathReason(Enum):

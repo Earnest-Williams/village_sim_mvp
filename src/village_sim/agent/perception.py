@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from village_sim.core.config import SimConfig
 from village_sim.core.time import SimClock
 from village_sim.core.types import Position, ResourceKind, ResourceSighting
+from village_sim.world.discoverables import DiscoverableObservation, perceive_discoverables
 from village_sim.world.grid import iter_positions_in_radius
 from village_sim.world.world import World
 
@@ -17,6 +18,7 @@ class Observation:
 
     visible_water: list[ResourceSighting] = field(default_factory=list)
     visible_food: list[ResourceSighting] = field(default_factory=list)
+    discoverables: list[DiscoverableObservation] = field(default_factory=list)
     is_daylight: bool = True
     is_night: bool = False
 
@@ -52,9 +54,11 @@ def perceive(
                     amount=food_amount,
                 )
             )
+    disc_obs = perceive_discoverables(world, position.x, position.y, radius)
     return Observation(
         visible_water=visible_water,
         visible_food=visible_food,
+        discoverables=disc_obs,
         is_daylight=clock.is_daylight,
         is_night=clock.is_night,
     )
