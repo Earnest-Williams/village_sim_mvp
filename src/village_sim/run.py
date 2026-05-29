@@ -103,6 +103,7 @@ def main() -> None:
         sim.action_library = ActionLibrary.load(args.action_library_in)
     result: SimResult = sim.run(snapshot_every=args.snapshot_every)
     print_result(result)
+    print_cold_summary(sim)
 
     if args.print_map:
         radius: int | None = (
@@ -151,6 +152,29 @@ def run_batch(args: argparse.Namespace) -> None:
             f"{result.death_reason},{result.remembered_water_sites},"
             f"{result.remembered_food_sites},{result.distance_walked}"
         )
+
+
+def print_cold_summary(sim: Simulation) -> None:
+    cold_weather_events: int = sum(
+        1 for event in sim.events if event.kind == "weather" and "cold" in event.message
+    )
+    cold_status_events: int = sum(
+        1 for event in sim.events if event.kind == "status" and "cold" in event.message
+    )
+    shelter_events: int = sum(
+        1
+        for event in sim.events
+        if event.kind == "action" and "shelter" in event.message
+    )
+    print(
+        "Cold/weather: "
+        f"temp_c={sim.current_weather.temperature_c:.1f} "
+        f"feels_cold={sim.current_weather.feels_cold} "
+        f"sheltered={sim._agent_is_sheltered()} "
+        f"cold_weather_events={cold_weather_events} "
+        f"cold_status_events={cold_status_events} "
+        f"shelter_events={shelter_events}"
+    )
 
 
 def print_result(result: SimResult) -> None:

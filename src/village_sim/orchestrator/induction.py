@@ -8,7 +8,6 @@ from village_sim.orchestrator.evaluator import NeedName
 from village_sim.orchestrator.symbolic import FactValue, SymbolicState
 from village_sim.orchestrator.trajectory import Trajectory
 
-
 # ── Precondition inference (§14) ─────────────────────────────────────────────
 
 
@@ -20,9 +19,7 @@ def fact_frequency(
     """Return the fraction of trajectories where fact==value at the start."""
     if not trajectories:
         return 0.0
-    matches = sum(
-        1 for t in trajectories if t.start.symbolic.get(fact) == value
-    )
+    matches = sum(1 for t in trajectories if t.start.symbolic.get(fact) == value)
     return matches / len(trajectories)
 
 

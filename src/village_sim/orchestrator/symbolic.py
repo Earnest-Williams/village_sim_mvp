@@ -60,6 +60,11 @@ def extract_symbolic_state(
         "health_low": agent.health < 0.30,
         "is_daylight": clock.is_daylight,
         "is_night": clock.is_night,
+        "is_raining": observation.is_raining,
+        "temperature_bucket": "cold" if observation.feels_cold else "mild",
+        "feels_cold": observation.feels_cold,
+        "cold_exposed": observation.feels_cold and not observation.is_sheltered,
+        "is_sheltered": observation.is_sheltered,
     }
 
     # Closest discoverable in current observation (§7 example predicates)

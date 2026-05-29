@@ -19,6 +19,9 @@ class AgentSnapshot:
     alive: bool
     goal: str
     action: str
+    feels_cold: bool = False
+    is_sheltered: bool = False
+    cold_status: str = "ok"
 
     def to_json_obj(self) -> dict[str, Any]:
         return asdict(self)
@@ -32,6 +35,10 @@ class WorldSnapshot:
     is_daylight: bool
     agents: list[AgentSnapshot]
     ascii_map: str | None = None
+    is_raining: bool = False
+    temperature_c: float = 18.0
+    feels_cold: bool = False
+    cold_reason: str = "none"
 
     def to_json_obj(self) -> dict[str, Any]:
         return asdict(self)

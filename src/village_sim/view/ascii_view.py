@@ -52,7 +52,9 @@ def render_ascii_map(world: World, agent: AgentState, radius: int | None = None)
             else:
                 chars.append("#")
         lines.append("".join(chars))
-    legend: str = "Legend: @ agent, z sleeping, ~ water, * food, T forest, ^ hill, # rock, . grass"
+    legend: str = (
+        "Legend: @ agent, z sleeping, ~ water, * food, T forest, ^ hill, # rock, . grass"
+    )
     status: str = (
         f"Agent: x={agent.position.x} y={agent.position.y} "
         f"goal={agent.current_goal.value} action={agent.current_action.value} "

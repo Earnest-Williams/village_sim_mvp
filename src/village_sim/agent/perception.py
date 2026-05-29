@@ -7,8 +7,14 @@ from dataclasses import dataclass, field
 from village_sim.core.config import SimConfig
 from village_sim.core.time import SimClock
 from village_sim.core.types import Position, ResourceKind, ResourceSighting
-from village_sim.world.discoverables import DiscoverableObservation, perceive_discoverables
+from village_sim.world.discoverables import (
+    DiscoverableKind,
+    DiscoverableObservation,
+    discoverable_at_or_adjacent,
+    perceive_discoverables,
+)
 from village_sim.world.grid import iter_positions_in_radius
+from village_sim.world.weather import WeatherState, make_weather_state
 from village_sim.world.world import World
 
 
@@ -21,6 +27,10 @@ class Observation:
     discoverables: list[DiscoverableObservation] = field(default_factory=list)
     is_daylight: bool = True
     is_night: bool = False
+    is_raining: bool = False
+    temperature_c: float = 18.0
+    feels_cold: bool = False
+    is_sheltered: bool = False
 
     def all_sightings(self) -> list[ResourceSighting]:
         return [*self.visible_water, *self.visible_food]
@@ -31,11 +41,30 @@ def perceive(
     position: Position,
     clock: SimClock,
     config: SimConfig,
+    weather: WeatherState | None = None,
+    is_sheltered: bool | None = None,
 ) -> Observation:
-    radius: int = config.vision_radius_day if clock.is_daylight else config.vision_radius_night
+    if weather is None:
+        weather = make_weather_state(
+            is_raining=False,
+            is_night=clock.is_night,
+            config=config,
+        )
+    sheltered: bool = False
+    if is_sheltered is None:
+        item = discoverable_at_or_adjacent(world, position.x, position.y)
+        sheltered = item is not None and item.kind is DiscoverableKind.CAVE
+    else:
+        sheltered = is_sheltered
+
+    radius: int = (
+        config.vision_radius_day if clock.is_daylight else config.vision_radius_night
+    )
     visible_water: list[ResourceSighting] = []
     visible_food: list[ResourceSighting] = []
-    for seen_position in iter_positions_in_radius(world.width, world.height, position, radius):
+    for seen_position in iter_positions_in_radius(
+        world.width, world.height, position, radius
+    ):
         water_amount: float = world.water_at(seen_position)
         if water_amount >= 0.25:
             visible_water.append(
@@ -61,4 +90,8 @@ def perceive(
         discoverables=disc_obs,
         is_daylight=clock.is_daylight,
         is_night=clock.is_night,
+        is_raining=weather.is_raining,
+        temperature_c=weather.temperature_c,
+        feels_cold=weather.feels_cold,
+        is_sheltered=sheltered,
     )

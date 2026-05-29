@@ -50,7 +50,9 @@ def initialize_food(
             elif neighbor_kind is TerrainKind.GRASS:
                 grass_neighbors += 1
 
-        edge_bonus: float = 0.050 if forest_neighbors > 0 and grass_neighbors > 0 else 0.0
+        edge_bonus: float = (
+            0.050 if forest_neighbors > 0 and grass_neighbors > 0 else 0.0
+        )
         base_chance: float = 0.012
         if kind is TerrainKind.FOREST:
             base_chance = 0.050
