@@ -323,11 +323,12 @@ class Simulation:
         if self.tick > 0 and self.tick % spawn_interval == 0:
             self.spawn_settlers(self.rng.randint(1, 3), self.tick)
 
-        active_mask: NDArray[np.bool_] = self.agents.active.copy()
+        initial_active_mask: NDArray[np.bool_] = self.agents.active.copy()
+        active_mask: NDArray[np.bool_] = initial_active_mask
         if not bool(np.any(active_mask)):
             self.tick += 1
             return
-        if int(np.count_nonzero(active_mask)) == 1:
+        if int(np.count_nonzero(active_mask)) == 1 and bool(active_mask[0]):
             self._step_single_agent_compat(clock, self.current_weather, active_mask)
             self.tick += 1
             return
@@ -345,8 +346,7 @@ class Simulation:
         self._record_timing("policy_pathing", perf_counter() - needs_start)
         if not bool(np.any(active_mask)):
             self._sync_agent_cache_from_arrays()
-            if not self.agent.alive:
-                self._log_agent_death()
+            self._log_newly_dead_agents(initial_active_mask)
             self.tick += 1
             return
 
@@ -369,7 +369,7 @@ class Simulation:
             world_width=self.world.width,
             tick=self.tick,
         )
-        if int(np.count_nonzero(active_mask)) == 1:
+        if int(np.count_nonzero(active_mask)) == 1 and bool(active_mask[0]):
             memory_frame: pl.DataFrame = self.global_memory.memories_for_agent(
                 self.memory.agent_id
             )
@@ -410,8 +410,7 @@ class Simulation:
         self.agents.active[death_mask] = False
         self._sync_agent_cache_from_arrays()
         self._log_cold_status_transition()
-        if not self.agent.alive:
-            self._log_agent_death()
+        self._log_newly_dead_agents(initial_active_mask)
 
         self.tick += 1
 
@@ -1046,6 +1045,22 @@ class Simulation:
         if self.agent.death_reason is not None:
             reason = self.agent.death_reason.value
         self._log("death", f"agent died from {reason}")
+
+    def _log_newly_dead_agents(
+        self, initial_active_mask: NDArray[np.bool_]
+    ) -> None:
+        newly_dead_mask: NDArray[np.bool_] = initial_active_mask & ~self.agents.active
+        for idx in np.flatnonzero(newly_dead_mask):
+            index = int(idx)
+            reason = self._death_reason_from_arrays(index).value
+            if index == 0:
+                self._log("death", f"agent died from {reason}")
+                continue
+            self._log_at(
+                "death",
+                f"agent {self.agent_ids[index]} died from {reason}",
+                Position(x=int(self.agents.x[index]), y=int(self.agents.y[index])),
+            )
 
     def _memory_at(
         self, kind: ResourceKind, position: Position
