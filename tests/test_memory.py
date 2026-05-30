@@ -18,6 +18,22 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(len(memory.resource_memories), 1)
         self.assertEqual(memory.resource_memories[0].position, Position(2, 3))
 
+    def test_global_memory_batches_duplicate_observations_before_flush(self) -> None:
+        memory = AgentMemory()
+        first = memory.queue_resource_observation(
+            ResourceKind.WATER, Position(4, 5), 1.0, tick=10
+        )
+        second = memory.queue_resource_observation(
+            ResourceKind.WATER, Position(4, 5), 0.5, tick=11
+        )
+
+        memory.flush_pending()
+
+        self.assertTrue(first)
+        self.assertFalse(second)
+        self.assertEqual(len(memory.resource_memories), 1)
+        self.assertEqual(memory.resource_memories[0].last_seen_tick, 11)
+
     def test_best_memory_prefers_confident_nearby_resource(self) -> None:
         memory = AgentMemory()
         config = SimConfig()
@@ -55,11 +71,17 @@ class MemoryTests(unittest.TestCase):
 
     def test_update_after_eviction_uses_consistent_lookup(self) -> None:
         memory = AgentMemory(capacity=2)
-        memory.observe(ResourceSighting(Position(0, 0), ResourceKind.WATER, 1.0), tick=1)
+        memory.observe(
+            ResourceSighting(Position(0, 0), ResourceKind.WATER, 1.0), tick=1
+        )
         memory.observe(ResourceSighting(Position(1, 1), ResourceKind.FOOD, 1.0), tick=2)
-        memory.observe(ResourceSighting(Position(2, 2), ResourceKind.WATER, 1.0), tick=3)
+        memory.observe(
+            ResourceSighting(Position(2, 2), ResourceKind.WATER, 1.0), tick=3
+        )
 
-        memory.observe(ResourceSighting(Position(1, 1), ResourceKind.FOOD, 0.25), tick=4)
+        memory.observe(
+            ResourceSighting(Position(1, 1), ResourceKind.FOOD, 0.25), tick=4
+        )
 
         self.assertEqual(len(memory.resource_memories), 2)
         self.assertNotIn(Position(0, 0), [m.position for m in memory.resource_memories])
