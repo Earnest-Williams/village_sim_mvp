@@ -36,7 +36,8 @@ def compute_social_interactions(
     dy: NDArray[np.int32] = np.abs(active_y[:, np.newaxis] - active_y[np.newaxis, :])
     distance: NDArray[np.int32] = np.maximum(dx, dy)
 
-    valid_pairs: NDArray[np.bool_] = (distance > 0) & (distance <= vision_radius)
+    valid_pairs: NDArray[np.bool_] = distance <= vision_radius
+    np.fill_diagonal(valid_pairs, False)
     buyer_offsets: NDArray[np.int64]
     seller_offsets: NDArray[np.int64]
     buyer_offsets, seller_offsets = np.where(valid_pairs)
