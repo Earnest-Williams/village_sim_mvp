@@ -336,7 +336,7 @@ def update_needs_arrays(
     *,
     is_night: bool,
     is_raining: bool,
-    is_sheltered: bool,
+    is_sheltered: bool | NDArray[np.bool_],
     is_cold_exposed: bool | None,
 ) -> None:
     """Advance all active agent arrays with NumPy vectorized operations."""
@@ -377,27 +377,38 @@ def update_needs_arrays(
     cold_exposed: bool = is_night or is_raining
     if is_cold_exposed is not None:
         cold_exposed = is_cold_exposed
-    if is_sheltered:
-        agent_arrays.cold_stress[active_mask] = np.clip(
-            agent_arrays.cold_stress[active_mask]
+    sheltered_mask: NDArray[np.bool_]
+    if isinstance(is_sheltered, np.ndarray):
+        sheltered_mask = active_mask & is_sheltered
+    else:
+        sheltered_mask = active_mask & np.full(
+            agent_arrays.count, is_sheltered, dtype=np.bool_
+        )
+    exposed_mask: NDArray[np.bool_] = active_mask & ~sheltered_mask
+    if bool(np.any(sheltered_mask)):
+        agent_arrays.cold_stress[sheltered_mask] = np.clip(
+            agent_arrays.cold_stress[sheltered_mask]
             - np.float32(config.cold_recovery_shelter),
             np.float32(0.0),
             np.float32(1.0),
         )
-    elif cold_exposed:
+    if cold_exposed and bool(np.any(exposed_mask)):
         cold_delta: np.float32 = np.float32(0.0)
         if is_night or not is_raining:
             cold_delta = np.float32(cold_delta + np.float32(config.cold_gain_night))
         if is_raining:
             cold_delta = np.float32(cold_delta + np.float32(config.cold_gain_rain))
-        agent_arrays.cold_stress[active_mask] = np.clip(
-            agent_arrays.cold_stress[active_mask] + cold_delta,
+        agent_arrays.cold_stress[exposed_mask] = np.clip(
+            agent_arrays.cold_stress[exposed_mask] + cold_delta,
             np.float32(0.0),
             np.float32(1.0),
         )
-    else:
-        agent_arrays.cold_stress[active_mask] = np.clip(
-            agent_arrays.cold_stress[active_mask]
+    daylight_recovery_mask: NDArray[np.bool_] = exposed_mask & ~np.full(
+        agent_arrays.count, cold_exposed, dtype=np.bool_
+    )
+    if bool(np.any(daylight_recovery_mask)):
+        agent_arrays.cold_stress[daylight_recovery_mask] = np.clip(
+            agent_arrays.cold_stress[daylight_recovery_mask]
             - np.float32(config.cold_recovery_daylight),
             np.float32(0.0),
             np.float32(1.0),

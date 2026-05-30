@@ -11,7 +11,10 @@ from village_sim.orchestrator.action_model import ActionLibrary
 from village_sim.sim.engine import Simulation
 from village_sim.sim.metrics import SimResult
 from village_sim.sim.replay import write_run_report
-from village_sim.view.ascii_view import render_ascii_map
+from village_sim.view.ascii_view import (
+    render_agent_arrays_map_model,
+    rendered_map_to_text,
+)
 
 
 def _parse_agent_count(raw_value: str) -> int:
@@ -136,7 +139,18 @@ def main() -> None:
         radius: int | None = (
             None if args.local_map_radius <= 0 else args.local_map_radius
         )
-        print(render_ascii_map(sim.world, sim.agent, radius=radius))
+        rendered = render_agent_arrays_map_model(
+            sim.world,
+            sim.agents,
+            sim.selected_agent_index,
+            radius=radius,
+            tick=sim.tick,
+            day=sim.tick // sim.config.ticks_per_day,
+            temperature_c=sim.current_weather.temperature_c,
+            is_raining=sim.current_weather.is_raining,
+            feels_cold=sim.current_weather.feels_cold,
+        )
+        print(rendered_map_to_text(rendered))
 
     if args.action_library_out is not None:
         sim.action_library.save(args.action_library_out)
@@ -158,25 +172,26 @@ def run_batch(args: argparse.Namespace) -> None:
     average_days: float = sum(result.days_elapsed for result in results) / float(
         len(results)
     )
-    average_distance: float = sum(result.distance_walked for result in results) / float(
-        len(results)
-    )
+    average_distance: float = sum(
+        result.total_distance_walked for result in results
+    ) / float(len(results))
     print(f"Batch runs: {len(results)}")
     print(f"Survived full duration: {survived_count}/{len(results)}")
     print(f"Average days elapsed: {average_days:.2f}")
     print(f"Average distance walked: {average_distance:.1f}")
     print(
-        "initial_agents,final_active_agents,seed,days,survived,death,"
-        "water_sites,food_sites,distance,final_cold_stress,final_temperature_c,"
+        "initial_agents,final_active_agents,dead_agents,seed,days,survived,death,"
+        "water_sites,food_sites,total_distance,avg_distance,final_cold_stress,final_temperature_c,"
         "final_feels_cold,final_is_sheltered,cold_weather_events,"
         "cold_status_events,shelter_events"
     )
     for result in results:
         print(
             f"{result.initial_agents},{result.final_active_agents},"
-            f"{result.seed},{result.days_elapsed:.2f},{result.survived},"
-            f"{result.death_reason},{result.remembered_water_sites},"
-            f"{result.remembered_food_sites},{result.distance_walked},"
+            f"{result.dead_agents},{result.seed},{result.days_elapsed:.2f},"
+            f"{result.survived},{result.death_reason},"
+            f"{result.total_water_memories},{result.total_food_memories},"
+            f"{result.total_distance_walked},{result.average_distance_walked:.1f},"
             f"{result.final_cold_stress:.2f},{result.final_temperature_c:.1f},"
             f"{result.final_feels_cold},{result.final_is_sheltered},"
             f"{result.cold_weather_events},{result.cold_status_events},"
@@ -242,15 +257,23 @@ def print_cold_summary(result: SimResult) -> None:
 def print_result(result: SimResult) -> None:
     print(f"Seed: {result.seed}")
     print(
-        f"Agents: initial={result.initial_agents} "
-        f"final_active={result.final_active_agents}"
+        f"Population: initial={result.initial_agents} "
+        f"final_active={result.final_active_agents} dead={result.dead_agents}"
     )
     print(f"Days elapsed: {result.days_elapsed:.2f}")
     print(f"Survived: {result.survived}")
     if result.death_reason is not None:
         print(f"Death reason: {result.death_reason}")
     print(
-        "Final needs: "
+        "Active averages: "
+        f"health={result.active_average_health:.2f} "
+        f"thirst={result.active_average_thirst:.2f} "
+        f"hunger={result.active_average_hunger:.2f} "
+        f"fatigue={result.active_average_fatigue:.2f} "
+        f"cold_stress={result.active_average_cold_stress:.2f}"
+    )
+    print(
+        "Primary agent final needs: "
         f"health={result.final_health:.2f} "
         f"thirst={result.final_thirst:.2f} "
         f"hunger={result.final_hunger:.2f} "
@@ -258,12 +281,14 @@ def print_result(result: SimResult) -> None:
         f"cold_stress={result.final_cold_stress:.2f}"
     )
     print(
-        "Discoveries: "
+        "Primary agent discoveries: "
         f"water={result.water_discoveries} food={result.food_discoveries} "
         f"remembered_water={result.remembered_water_sites} "
         f"remembered_food={result.remembered_food_sites}"
     )
-    print(f"Distance walked: {result.distance_walked}")
+    print(f"Total distance walked: {result.total_distance_walked}")
+    print(f"Average distance walked: {result.average_distance_walked:.1f}")
+    print(f"Deaths by reason: {result.deaths_by_reason}")
 
 
 def launch_wx_interface(args: argparse.Namespace | None = None) -> None:

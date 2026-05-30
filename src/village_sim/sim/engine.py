@@ -49,6 +49,8 @@ from village_sim.agent.state import (
     make_agent_arrays,
     sync_agent_from_arrays,
     sync_agent_to_arrays,
+    DEATH_TO_ID,
+    ID_TO_DEATH,
     validate_arrays_match_dataclasses,
 )
 from village_sim.core.config import SimConfig
@@ -97,7 +99,12 @@ from village_sim.world.discoverables import (
     make_initial_discoverables,
     update_discoverable_memory,
 )
-from village_sim.world.grid import STRUCTURE_SHELTER, WorldGrids, index_of
+from village_sim.world.grid import (
+    STRUCTURE_SHELTER,
+    WorldGrids,
+    index_of,
+    iter_neighbor_positions,
+)
 from village_sim.world.weather import (
     COLD_REASON_DAY,
     COLD_REASON_NIGHT,
@@ -120,6 +127,12 @@ from village_sim.world.weather import (
 )
 from village_sim.world.water_system import WaterSystemState
 from village_sim.world.world import World, choose_spawn_position, generate_world
+
+
+def _mean_or_zero(values: NDArray[np.float32], mask: NDArray[np.bool_]) -> float:
+    if not bool(np.any(mask)):
+        return 0.0
+    return float(np.mean(values[mask], dtype=np.float64))
 
 
 @dataclass(slots=True)
@@ -178,6 +191,9 @@ class Simulation:
     action_knowledge_frame: pl.DataFrame = field(init=False)
     economy: Economy = field(init=False)
     agent_ids: NDArray[np.int64] = field(init=False)
+    selected_agent_index: int = 0
+    _last_sheltered_mask: NDArray[np.bool_] = field(init=False)
+    _last_cold_status_by_agent: NDArray[np.int16] = field(init=False)
 
     def __post_init__(self) -> None:
         self.config.validate()
@@ -203,6 +219,8 @@ class Simulation:
         self.agent_arrays = self.agents
         self.agent_ids = np.zeros(self.max_agents, dtype=np.int64)
         self.agent_ids[0] = np.int64(self.agent.agent_id)
+        self._last_sheltered_mask = np.zeros(self.max_agents, dtype=np.bool_)
+        self._last_cold_status_by_agent = np.zeros(self.max_agents, dtype=np.int16)
         sync_agent_to_arrays(self.agents, self.agent, 0)
         self.global_memory = GlobalMemory()
         self.memory = AgentMemory(
@@ -265,6 +283,8 @@ class Simulation:
         self.agents.cold_stress[free_slots] = np.float32(0.0)
         self.agents.health[free_slots] = np.float32(1.0)
         self.agents.awake_ticks[free_slots] = np.int32(0)
+        self.agents.distance_walked[free_slots] = np.int32(0)
+        self.agents.death_reason[free_slots] = np.int16(-1)
 
         rng: np.random.Generator = np.random.default_rng(self.config.seed + tick)
         perturbations: NDArray[np.float32] = rng.uniform(
@@ -295,7 +315,7 @@ class Simulation:
         *,
         is_night: bool = False,
         is_raining: bool = False,
-        is_sheltered: bool = False,
+        is_sheltered: bool | NDArray[np.bool_] = False,
         is_cold_exposed: bool | None = None,
     ) -> None:
         self._sync_agent_cache_to_arrays()
@@ -486,18 +506,21 @@ class Simulation:
         self._resolve_movement_intents(active_mask, desired_x, desired_y)
         self._consume_multi_agent_resources(drink_id, eat_id)
 
+        sheltered_mask: NDArray[np.bool_] = self.agent_sheltered_mask()
+        before_cold: NDArray[np.float32] = self.agents.cold_stress.copy()
+        before_needs_active: NDArray[np.bool_] = self.agents.active.copy()
         update_needs_arrays(
             self.agents,
             self.config,
             is_night=clock.is_night,
             is_raining=weather.is_raining,
-            is_sheltered=False,
+            is_sheltered=sheltered_mask,
             is_cold_exposed=weather.feels_cold,
         )
-        death_mask: NDArray[np.bool_] = self.agents.active & (
-            self.agents.health <= np.float32(0.0)
-        )
-        self.agents.active[death_mask] = False
+        self._log_shelter_transitions(sheltered_mask)
+        self._log_cold_status_transitions_by_agent(before_cold)
+        death_mask: NDArray[np.bool_] = before_needs_active & ~self.agents.active
+        self._record_death_reasons(death_mask)
         self._sync_agent_cache_from_arrays()
         self._log_cold_status_transition()
         self.global_memory.decay_confidence(self.tick, self.config)
@@ -782,6 +805,7 @@ class Simulation:
         winners: NDArray[np.int64] = eligible_rows[order][first_indices]
         self.agents.x[winners] = desired_x[winners]
         self.agents.y[winners] = desired_y[winners]
+        self.agents.distance_walked[winners] += np.int32(1)
 
     def _consume_multi_agent_resources(
         self, drink_id: np.int16, eat_id: np.int16
@@ -868,7 +892,7 @@ class Simulation:
         resource_grid[:] = np.maximum(0.0, resource_grid - drain)
 
     def run(self, snapshot_every: int = 0) -> SimResult:
-        while self.tick < self.config.max_ticks() and bool(self.agents.active[0]):
+        while self.tick < self.config.max_ticks() and bool(np.any(self.agents.active)):
             self.step()
             if snapshot_every > 0 and self.tick % snapshot_every == 0:
                 snapshot_start: float = perf_counter()
@@ -897,6 +921,34 @@ class Simulation:
         best_food: ResourceMemory | None = self.memory.best_memory(
             ResourceKind.FOOD, self.agent.position, self.tick, self.config
         )
+        active_mask: NDArray[np.bool_] = self.agents.active
+        ever_used_mask: NDArray[np.bool_] = self.agent_ids > np.int64(0)
+        active_count: int = int(np.count_nonzero(active_mask))
+        used_count: int = int(np.count_nonzero(ever_used_mask))
+        dead_count: int = int(np.count_nonzero(ever_used_mask & ~active_mask))
+        active_average_health: float = _mean_or_zero(self.agents.health, active_mask)
+        active_average_thirst: float = _mean_or_zero(self.agents.thirst, active_mask)
+        active_average_hunger: float = _mean_or_zero(self.agents.hunger, active_mask)
+        active_average_fatigue: float = _mean_or_zero(self.agents.fatigue, active_mask)
+        active_average_cold_stress: float = _mean_or_zero(
+            self.agents.cold_stress, active_mask
+        )
+        all_average_health: float = _mean_or_zero(self.agents.health, ever_used_mask)
+        all_average_thirst: float = _mean_or_zero(self.agents.thirst, ever_used_mask)
+        all_average_hunger: float = _mean_or_zero(self.agents.hunger, ever_used_mask)
+        all_average_fatigue: float = _mean_or_zero(self.agents.fatigue, ever_used_mask)
+        all_average_cold_stress: float = _mean_or_zero(
+            self.agents.cold_stress, ever_used_mask
+        )
+        total_distance_walked: int = int(
+            np.sum(self.agents.distance_walked[ever_used_mask], dtype=np.int64)
+        )
+        average_distance_walked: float = float(total_distance_walked) / float(
+            max(1, used_count)
+        )
+        deaths_by_reason: dict[str, int] = self._deaths_by_reason()
+        total_water_memories: int = self._global_memory_count(ResourceKind.WATER)
+        total_food_memories: int = self._global_memory_count(ResourceKind.FOOD)
         return SimResult(
             seed=self.config.seed,
             days_elapsed=days_elapsed,
@@ -920,7 +972,28 @@ class Simulation:
             remembered_water_sites=remembered_water_sites,
             remembered_food_sites=remembered_food_sites,
             initial_agents=self.config.initial_agents,
-            final_active_agents=int(np.count_nonzero(self.agents.active)),
+            final_active_agents=active_count,
+            dead_agents=dead_count,
+            active_average_health=active_average_health,
+            active_average_thirst=active_average_thirst,
+            active_average_hunger=active_average_hunger,
+            active_average_fatigue=active_average_fatigue,
+            active_average_cold_stress=active_average_cold_stress,
+            all_average_health=all_average_health,
+            all_average_thirst=all_average_thirst,
+            all_average_hunger=all_average_hunger,
+            all_average_fatigue=all_average_fatigue,
+            all_average_cold_stress=all_average_cold_stress,
+            total_distance_walked=total_distance_walked,
+            average_distance_walked=average_distance_walked,
+            deaths_by_reason=deaths_by_reason,
+            total_water_memories=total_water_memories,
+            total_food_memories=total_food_memories,
+            total_memory_directed_decisions=self.learning.memory_directed_resource_ticks,
+            total_exploration_directed_decisions=self.learning.exploration_resource_ticks,
+            total_shelter_events=count_shelter_events(self.events),
+            total_cold_events=count_cold_weather_events(self.events)
+            + count_cold_status_events(self.events),
             learning=self.learning,
             best_water_memory_x=-1 if best_water is None else best_water.position.x,
             best_water_memory_y=-1 if best_water is None else best_water.position.y,
@@ -953,6 +1026,25 @@ class Simulation:
             goap_plan_executions=self.goap_plan_executions,
             successful_goap_plan_executions=self.successful_goap_plan_executions,
         )
+
+    def _deaths_by_reason(self) -> dict[str, int]:
+        reasons: dict[str, int] = {}
+        death_rows: NDArray[np.int64] = np.flatnonzero(
+            self.agents.death_reason >= np.int16(0)
+        ).astype(np.int64)
+        for row in death_rows:
+            reason = ID_TO_DEATH.get(int(self.agents.death_reason[row]))
+            if reason is None:
+                continue
+            reasons[reason.value] = reasons.get(reason.value, 0) + 1
+        return reasons
+
+    def _global_memory_count(self, kind: ResourceKind) -> int:
+        self.global_memory.flush_pending()
+        if self.global_memory.frame.is_empty():
+            return 0
+        kind_id: int = 1 if kind is ResourceKind.WATER else 2
+        return self.global_memory.frame.filter(pl.col(MEMORY_KIND) == kind_id).height
 
     def snapshot(self, include_ascii: bool = False) -> WorldSnapshot:
         clock: SimClock = clock_from_tick(self.tick, self.config)
@@ -1207,14 +1299,21 @@ class Simulation:
             height - np.int32(1),
         ).astype(np.int32, copy=False)
 
+        sheltered_mask = self.agent_sheltered_mask()
+        before_cold = self.agents.cold_stress.copy()
+        before_needs_active = self.agents.active.copy()
         update_needs_arrays(
             self.agents,
             self.config,
             is_night=clock.is_night,
             is_raining=weather.is_raining,
-            is_sheltered=False,
+            is_sheltered=sheltered_mask,
             is_cold_exposed=weather.feels_cold,
         )
+        self._log_shelter_transitions(sheltered_mask)
+        self._log_cold_status_transitions_by_agent(before_cold)
+        death_mask = before_needs_active & ~self.agents.active
+        self._record_death_reasons(death_mask)
         self._sync_agent_cache_from_arrays()
         self._log_cold_status_transition()
         if not bool(self.agents.active[0]):
@@ -1390,6 +1489,79 @@ class Simulation:
     def advance_interaction_ticks(self, interaction_ticks: int) -> None:
         """Advance time while an explicit multi-tick interaction is in progress."""
         self._advance_interaction_ticks(interaction_ticks)
+
+    def agent_sheltered_mask(self) -> NDArray[np.bool_]:
+        """Return per-agent cave/structure shelter mask for active agents."""
+
+        sheltered_tiles: NDArray[np.bool_] = np.zeros(
+            self.world.width * self.world.height, dtype=np.bool_
+        )
+        for item in self.world.discoverables.values():
+            if item.kind is not DiscoverableKind.CAVE:
+                continue
+            center = Position(x=item.x, y=item.y)
+            sheltered_tiles[index_of(self.world.width, center)] = True
+            for neighbor in iter_neighbor_positions(
+                self.world.width, self.world.height, center, False
+            ):
+                sheltered_tiles[index_of(self.world.width, neighbor)] = True
+        grids: object = getattr(self, "grids", None)
+        if isinstance(grids, WorldGrids) and grids.cell_count == sheltered_tiles.size:
+            structure_tiles: NDArray[np.bool_] = (
+                grids.structure_kind == STRUCTURE_SHELTER
+            )
+            sheltered_tiles |= structure_tiles
+        agent_tiles: NDArray[np.int64] = self.agents.y.astype(
+            np.int64
+        ) * self.world.width + self.agents.x.astype(np.int64)
+        return self.agents.active & sheltered_tiles[agent_tiles]
+
+    def _log_shelter_transitions(self, sheltered_mask: NDArray[np.bool_]) -> None:
+        entered: NDArray[np.bool_] = (
+            self.agents.active & sheltered_mask & ~self._last_sheltered_mask
+        )
+        rows: NDArray[np.int64] = np.flatnonzero(entered).astype(np.int64)
+        for row in rows:
+            self._log_agent_event(int(row), "action", "sheltered")
+        self._last_sheltered_mask[:] = sheltered_mask
+
+    def _log_cold_status_transitions_by_agent(
+        self, before_cold: NDArray[np.float32]
+    ) -> None:
+        del before_cold
+        current: NDArray[np.int16] = np.zeros(self.max_agents, dtype=np.int16)
+        current[self.agents.cold_stress >= np.float32(0.30)] = np.int16(1)
+        current[self.agents.cold_stress >= np.float32(0.60)] = np.int16(2)
+        changed: NDArray[np.bool_] = self.agents.active & (
+            current != self._last_cold_status_by_agent
+        )
+        rows: NDArray[np.int64] = np.flatnonzero(changed).astype(np.int64)
+        for row in rows:
+            if int(current[row]) == 1:
+                self._log_agent_event(int(row), "status", STATUS_AGENT_COLD)
+            elif int(current[row]) == 2:
+                self._log_agent_event(int(row), "status", STATUS_AGENT_SEVERELY_COLD)
+        self._last_cold_status_by_agent[:] = current
+
+    def _log_agent_event(self, agent_index: int, kind: str, message: str) -> None:
+        clock: SimClock = clock_from_tick(self.tick, self.config)
+        self.events.append(
+            TickEvent(
+                tick=self.tick,
+                day=clock.day,
+                actor=f"agent:{int(self.agent_ids[agent_index])}",
+                kind=kind,
+                message=message,
+                x=int(self.agents.x[agent_index]),
+                y=int(self.agents.y[agent_index]),
+            )
+        )
+
+    def _record_death_reasons(self, death_mask: NDArray[np.bool_]) -> None:
+        rows: NDArray[np.int64] = np.flatnonzero(death_mask).astype(np.int64)
+        for row in rows:
+            reason = self._death_reason_from_arrays(int(row))
+            self.agents.death_reason[row] = np.int16(DEATH_TO_ID[reason])
 
     def agent_is_sheltered(self) -> bool:
         """Return whether the agent is currently sheltered by cave adjacency."""

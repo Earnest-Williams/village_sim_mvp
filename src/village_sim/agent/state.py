@@ -89,6 +89,8 @@ class AgentArrays:
     current_action: NDArray[np.int16]
     action_queue_kind: NDArray[np.int32]
     action_queue_duration: NDArray[np.int32]
+    distance_walked: NDArray[np.int32]
+    death_reason: NDArray[np.int16]
 
     @property
     def alive(self) -> NDArray[np.bool_]:
@@ -105,6 +107,12 @@ ID_TO_ACTION: dict[int, ActionKind] = {
 }
 GOAL_TO_ID: dict[GoalKind, int] = {goal: index for index, goal in enumerate(GoalKind)}
 ID_TO_GOAL: dict[int, GoalKind] = {index: goal for goal, index in GOAL_TO_ID.items()}
+DEATH_TO_ID: dict[DeathReason, int] = {
+    reason: index for index, reason in enumerate(DeathReason)
+}
+ID_TO_DEATH: dict[int, DeathReason] = {
+    index: reason for reason, index in DEATH_TO_ID.items()
+}
 
 
 def make_agent_arrays(capacity: int = MAX_AGENTS) -> AgentArrays:
@@ -127,6 +135,8 @@ def make_agent_arrays(capacity: int = MAX_AGENTS) -> AgentArrays:
         current_action=np.zeros(capacity, dtype=np.int16),
         action_queue_kind=np.zeros(capacity, dtype=np.int32),
         action_queue_duration=np.zeros(capacity, dtype=np.int32),
+        distance_walked=np.zeros(capacity, dtype=np.int32),
+        death_reason=np.full(capacity, -1, dtype=np.int16),
     )
 
 
@@ -158,6 +168,10 @@ def sync_agent_to_arrays(arrays: AgentArrays, agent: AgentState, index: int) -> 
     arrays.awake_ticks[index] = agent.awake_ticks
     arrays.current_goal[index] = GOAL_TO_ID[agent.current_goal]
     arrays.current_action[index] = ACTION_TO_ID[agent.current_action]
+    arrays.distance_walked[index] = np.int32(agent.distance_walked)
+    arrays.death_reason[index] = np.int16(-1)
+    if agent.death_reason is not None:
+        arrays.death_reason[index] = np.int16(DEATH_TO_ID[agent.death_reason])
 
 
 def sync_agent_from_arrays(arrays: AgentArrays, agent: AgentState, index: int) -> None:

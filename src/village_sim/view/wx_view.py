@@ -6,10 +6,14 @@ import threading
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
+
+import numpy as np
 import wx
 import wx.stc as wxstc
 
-from village_sim.agent.state import MAX_AGENTS
+from village_sim.agent.memory import MEMORY_AGENT_ID, MEMORY_KIND
+from village_sim.agent.state import ID_TO_ACTION, ID_TO_DEATH, ID_TO_GOAL, MAX_AGENTS
 from village_sim.core.config import SimConfig
 from village_sim.orchestrator.action_model import ActionLibrary
 from village_sim.sim.engine import Simulation
@@ -18,8 +22,7 @@ from village_sim.sim.replay import write_run_report
 from village_sim.view.ascii_view import (
     ROLE_COLORS,
     RenderedMap,
-    render_ascii_map,
-    render_map_model,
+    render_agent_arrays_map_model,
 )
 from village_sim.view.stc_map import (
     GUI_DEFAULT_WORLD_SIZE,
@@ -107,42 +110,58 @@ class VillageSimFrame(wx.Frame):
         super().__init__(parent=None, title="Village Sim MVP", size=(980, 840))
         panel = wx.Panel(self)
         root_sizer = wx.BoxSizer(wx.VERTICAL)
+        self._build_menu_bar()
+        self.setup_panel = wx.Panel(panel)
 
         controls_sizer = wx.FlexGridSizer(rows=10, cols=4, vgap=8, hgap=8)
         controls_sizer.AddGrowableCol(1, 1)
         controls_sizer.AddGrowableCol(3, 1)
 
-        self.seed_ctrl = wx.SpinCtrl(panel, min=1, max=1_000_000, initial=options.seed)
-        self.days_ctrl = wx.SpinCtrl(panel, min=1, max=365, initial=options.days)
-        self.agents_ctrl = wx.SpinCtrl(
-            panel, min=1, max=MAX_AGENTS, initial=options.initial_agents
+        self.seed_ctrl = wx.SpinCtrl(
+            self.setup_panel, min=1, max=1_000_000, initial=options.seed
         )
-        self.width_ctrl = wx.SpinCtrl(panel, min=8, max=256, initial=options.width)
-        self.height_ctrl = wx.SpinCtrl(panel, min=8, max=256, initial=options.height)
-        self.batch_ctrl = wx.SpinCtrl(panel, min=1, max=10_000, initial=options.batch)
+        self.days_ctrl = wx.SpinCtrl(
+            self.setup_panel, min=1, max=365, initial=options.days
+        )
+        self.agents_ctrl = wx.SpinCtrl(
+            self.setup_panel, min=1, max=MAX_AGENTS, initial=options.initial_agents
+        )
+        self.width_ctrl = wx.SpinCtrl(
+            self.setup_panel, min=8, max=256, initial=options.width
+        )
+        self.height_ctrl = wx.SpinCtrl(
+            self.setup_panel, min=8, max=256, initial=options.height
+        )
+        self.batch_ctrl = wx.SpinCtrl(
+            self.setup_panel, min=1, max=10_000, initial=options.batch
+        )
         self.local_map_radius_ctrl = wx.SpinCtrl(
-            panel, min=0, max=512, initial=options.local_map_radius
+            self.setup_panel, min=0, max=512, initial=options.local_map_radius
         )
         self.snapshot_every_ctrl = wx.SpinCtrl(
-            panel, min=0, max=1_000_000, initial=options.snapshot_every
+            self.setup_panel, min=0, max=1_000_000, initial=options.snapshot_every
         )
-        self.speed_ctrl = wx.SpinCtrl(panel, min=0, max=1000, initial=25)
+        self.speed_ctrl = wx.SpinCtrl(self.setup_panel, min=0, max=1000, initial=25)
         self.map_font_size_ctrl = wx.SpinCtrl(
-            panel, min=6, max=24, initial=MAP_DEFAULT_FONT_POINT_SIZE
+            self.setup_panel, min=6, max=24, initial=MAP_DEFAULT_FONT_POINT_SIZE
         )
-        self.print_map_ctrl = wx.CheckBox(panel, label="Render final ASCII map")
+        self.print_map_ctrl = wx.CheckBox(
+            self.setup_panel, label="Render final ASCII map"
+        )
         self.print_map_ctrl.SetValue(options.print_map)
         self.discoverables_ctrl = wx.CheckBox(
-            panel,
+            self.setup_panel,
             label="Seed canonical discoverables",
         )
         self.discoverables_ctrl.SetValue(options.discoverables)
-        self.goap_ctrl = wx.CheckBox(panel, label="Enable GOAP control")
+        self.goap_ctrl = wx.CheckBox(self.setup_panel, label="Enable GOAP control")
         self.goap_ctrl.SetValue(options.goap)
-        self.tick_update_ctrl = wx.CheckBox(panel, label="Update map every tick")
-        self.action_library_in_ctrl = wx.TextCtrl(panel)
-        self.action_library_out_ctrl = wx.TextCtrl(panel)
-        self.replay_ctrl = wx.TextCtrl(panel)
+        self.tick_update_ctrl = wx.CheckBox(
+            self.setup_panel, label="Update map every tick"
+        )
+        self.action_library_in_ctrl = wx.TextCtrl(self.setup_panel)
+        self.action_library_out_ctrl = wx.TextCtrl(self.setup_panel)
+        self.replay_ctrl = wx.TextCtrl(self.setup_panel)
         if options.action_library_in is not None:
             self.action_library_in_ctrl.SetValue(str(options.action_library_in))
         if options.action_library_out is not None:
@@ -150,33 +169,45 @@ class VillageSimFrame(wx.Frame):
         if options.replay is not None:
             self.replay_ctrl.SetValue(str(options.replay))
 
-        self._add_labeled_control(controls_sizer, panel, "Seed", self.seed_ctrl)
-        self._add_labeled_control(controls_sizer, panel, "Days", self.days_ctrl)
-        self._add_labeled_control(controls_sizer, panel, "Agents", self.agents_ctrl)
-        self._add_labeled_control(controls_sizer, panel, "Width", self.width_ctrl)
-        self._add_labeled_control(controls_sizer, panel, "Height", self.height_ctrl)
-        self._add_labeled_control(controls_sizer, panel, "Batch runs", self.batch_ctrl)
+        self._add_labeled_control(
+            controls_sizer, self.setup_panel, "Seed", self.seed_ctrl
+        )
+        self._add_labeled_control(
+            controls_sizer, self.setup_panel, "Days", self.days_ctrl
+        )
+        self._add_labeled_control(
+            controls_sizer, self.setup_panel, "Agents", self.agents_ctrl
+        )
+        self._add_labeled_control(
+            controls_sizer, self.setup_panel, "Width", self.width_ctrl
+        )
+        self._add_labeled_control(
+            controls_sizer, self.setup_panel, "Height", self.height_ctrl
+        )
+        self._add_labeled_control(
+            controls_sizer, self.setup_panel, "Batch runs", self.batch_ctrl
+        )
         self._add_labeled_control(
             controls_sizer,
-            panel,
+            self.setup_panel,
             "Local map radius",
             self.local_map_radius_ctrl,
         )
         self._add_labeled_control(
             controls_sizer,
-            panel,
+            self.setup_panel,
             "Snapshot every N ticks",
             self.snapshot_every_ctrl,
         )
         self._add_labeled_control(
             controls_sizer,
-            panel,
+            self.setup_panel,
             "Tick delay (ms)",
             self.speed_ctrl,
         )
         self._add_labeled_control(
             controls_sizer,
-            panel,
+            self.setup_panel,
             "Map font size",
             self.map_font_size_ctrl,
         )
@@ -186,20 +217,21 @@ class VillageSimFrame(wx.Frame):
         controls_sizer.Add(self.tick_update_ctrl, 0, wx.ALIGN_CENTER_VERTICAL)
         self._add_labeled_control(
             controls_sizer,
-            panel,
+            self.setup_panel,
             "Action library in",
             self.action_library_in_ctrl,
         )
         self._add_labeled_control(
             controls_sizer,
-            panel,
+            self.setup_panel,
             "Action library out",
             self.action_library_out_ctrl,
         )
         self._add_labeled_control(
-            controls_sizer, panel, "Replay MessagePack", self.replay_ctrl
+            controls_sizer, self.setup_panel, "Replay MessagePack", self.replay_ctrl
         )
         controls_sizer.Add((0, 0), 1, wx.EXPAND)
+        self.setup_panel.SetSizer(controls_sizer)
 
         self.run_button = wx.Button(panel, label="Run Simulation")
         self.run_button.Bind(wx.EVT_BUTTON, self.on_run)
@@ -210,13 +242,23 @@ class VillageSimFrame(wx.Frame):
             size=(-1, 150),
         )
         self.summary_ctrl.SetBackgroundColour(panel.GetBackgroundColour())
+        self.selected_agent_index: int = 0
+        self.selected_agent_ctrl = wx.TextCtrl(
+            panel,
+            style=wx.TE_MULTILINE | wx.TE_READONLY | wx.BORDER_NONE,
+            size=(-1, 70),
+        )
+        self.selected_agent_ctrl.SetBackgroundColour(panel.GetBackgroundColour())
+        self.roster_ctrl = wx.ListCtrl(panel, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)  # type: ignore[attr-defined]
+        self._configure_roster_ctrl()
+        self.roster_ctrl.Bind(wx.EVT_LIST_ITEM_SELECTED, self.on_roster_selected)  # type: ignore[attr-defined]
         self.map_ctrl = wxstc.StyledTextCtrl(panel, style=wx.BORDER_NONE)
         self._last_rendered_map: RenderedMap | None = None
         self._configure_map_ctrl()
         self.map_font_size_ctrl.Bind(wx.EVT_SPINCTRL, self.on_map_font_size_changed)
         self.map_font_size_ctrl.Bind(wx.EVT_TEXT, self.on_map_font_size_changed)
 
-        root_sizer.Add(controls_sizer, 0, wx.EXPAND | wx.ALL, 12)
+        root_sizer.Add(self.setup_panel, 0, wx.EXPAND | wx.ALL, 12)
         root_sizer.Add(self.run_button, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
         root_sizer.Add(
             wx.StaticText(panel, label="Run Summary"), 0, wx.LEFT | wx.RIGHT, 12
@@ -224,11 +266,84 @@ class VillageSimFrame(wx.Frame):
         root_sizer.Add(
             self.summary_ctrl, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12
         )
+        root_sizer.Add(
+            wx.StaticText(panel, label="Selected Agent"), 0, wx.LEFT | wx.RIGHT, 12
+        )
+        root_sizer.Add(
+            self.selected_agent_ctrl, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12
+        )
+        root_sizer.Add(
+            wx.StaticText(panel, label="Agent Roster"), 0, wx.LEFT | wx.RIGHT, 12
+        )
+        root_sizer.Add(
+            self.roster_ctrl, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12
+        )
         root_sizer.Add(wx.StaticText(panel, label="Map"), 0, wx.LEFT | wx.RIGHT, 12)
         root_sizer.Add(self.map_ctrl, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
 
         panel.SetSizer(root_sizer)
         self.Centre()
+
+    def _build_menu_bar(self) -> None:
+        menu_bar = wx.MenuBar()  # type: ignore[attr-defined]
+        sim_menu = wx.Menu()  # type: ignore[attr-defined]
+        for label in (
+            "New Simulation",
+            "Start",
+            "Pause",
+            "Resume",
+            "Stop",
+            "Step One Tick",
+            "Save Replay",
+            "Load Replay",
+        ):
+            item = sim_menu.Append(wx.ID_ANY, label)  # type: ignore[attr-defined]
+            if label in {"New Simulation", "Start"}:
+                self.Bind(wx.EVT_MENU, self.on_run, item)  # type: ignore[attr-defined, call-arg]
+        view_menu = wx.Menu()  # type: ignore[attr-defined]
+        for label in (
+            "View Full Map",
+            "View Local Map",
+            "Follow Selected Agent",
+            "Show Roster",
+            "Show Setup Panel",
+            "Font Size",
+        ):
+            item = view_menu.Append(wx.ID_ANY, label)  # type: ignore[attr-defined]
+            if label == "Show Setup Panel":
+                self.Bind(wx.EVT_MENU, self.on_show_setup_panel, item)  # type: ignore[attr-defined, call-arg]
+        menu_bar.Append(sim_menu, "Simulation")
+        menu_bar.Append(view_menu, "View")
+        self.SetMenuBar(menu_bar)  # type: ignore[attr-defined]
+
+    def on_show_setup_panel(self, _: wx.CommandEvent) -> None:
+        self.setup_panel.Show(not self.setup_panel.IsShown())  # type: ignore[attr-defined]
+        self.Layout()  # type: ignore[attr-defined]
+
+    def _configure_roster_ctrl(self) -> None:
+        columns: tuple[str, ...] = (
+            "id",
+            "active",
+            "x",
+            "y",
+            "action",
+            "goal",
+            "health",
+            "thirst",
+            "hunger",
+            "fatigue",
+            "cold",
+            "distance",
+            "water memories",
+            "food memories",
+            "death reason",
+        )
+        for column_index, label in enumerate(columns):
+            self.roster_ctrl.InsertColumn(column_index, label)
+            self.roster_ctrl.SetColumnWidth(column_index, 92)
+
+    def on_roster_selected(self, event: Any) -> None:
+        self.selected_agent_index = event.GetIndex()
 
     @staticmethod
     def _add_labeled_control(
@@ -351,6 +466,8 @@ class VillageSimFrame(wx.Frame):
 
     def on_run(self, _: wx.CommandEvent) -> None:
         self.run_button.Disable()
+        self.setup_panel.Hide()  # type: ignore[attr-defined]
+        self.Layout()  # type: ignore[attr-defined]
         self.summary_ctrl.Clear()
         self._clear_map_ctrl()
         options: GuiRunOptions = self._collect_options()
@@ -413,7 +530,7 @@ class VillageSimFrame(wx.Frame):
 
         max_ticks: int = options.config.max_ticks()
         last_map_update_time: float = time.monotonic() - MAP_UPDATE_INTERVAL_SECONDS
-        while sim.tick < max_ticks and sim.agent.alive:
+        while sim.tick < max_ticks and bool(np.any(sim.agents.active)):
             sim.step()
             if options.snapshot_every > 0 and sim.tick % options.snapshot_every == 0:
                 sim.snapshots.append(sim.snapshot(include_ascii=True))
@@ -429,6 +546,7 @@ class VillageSimFrame(wx.Frame):
                 time.sleep(options.tick_delay_seconds)
 
         result: SimResult = sim.result()
+        wx.CallAfter(self._update_roster, sim)
         if options.action_library_out is not None:
             sim.action_library.save(options.action_library_out)
         if options.replay is not None:
@@ -464,7 +582,7 @@ class VillageSimFrame(wx.Frame):
             len(results)
         )
         average_distance: float = sum(
-            result.distance_walked for result in results
+            result.total_distance_walked for result in results
         ) / float(len(results))
         lines: list[str] = [
             f"Batch runs: {len(results)}",
@@ -472,8 +590,8 @@ class VillageSimFrame(wx.Frame):
             f"Average days elapsed: {average_days:.2f}",
             f"Average distance walked: {average_distance:.1f}",
             (
-                "initial_agents,final_active_agents,seed,days,survived,death,"
-                "water_sites,food_sites,distance,final_cold_stress,"
+                "initial_agents,final_active_agents,dead_agents,seed,days,survived,death,"
+                "water_sites,food_sites,total_distance,avg_distance,final_cold_stress,"
                 "final_temperature_c,final_feels_cold,final_is_sheltered,"
                 "cold_weather_events,cold_status_events,shelter_events"
             ),
@@ -481,9 +599,10 @@ class VillageSimFrame(wx.Frame):
         for result in results:
             lines.append(
                 f"{result.initial_agents},{result.final_active_agents},"
-                f"{result.seed},{result.days_elapsed:.2f},{result.survived},"
-                f"{result.death_reason},{result.remembered_water_sites},"
-                f"{result.remembered_food_sites},{result.distance_walked},"
+                f"{result.dead_agents},{result.seed},{result.days_elapsed:.2f},"
+                f"{result.survived},{result.death_reason},"
+                f"{result.total_water_memories},{result.total_food_memories},"
+                f"{result.total_distance_walked},{result.average_distance_walked:.1f},"
                 f"{result.final_cold_stress:.2f},{result.final_temperature_c:.1f},"
                 f"{result.final_feels_cold},{result.final_is_sheltered},"
                 f"{result.cold_weather_events},{result.cold_status_events},"
@@ -499,19 +618,67 @@ class VillageSimFrame(wx.Frame):
             lines.append("Snapshot capture is ignored for batch runs.")
         return "\n".join(lines)
 
-    @staticmethod
-    def _render_map(sim: Simulation, local_map_radius: int) -> str:
+    def _render_map_model(self, sim: Simulation, local_map_radius: int) -> RenderedMap:
         radius: int | None = None
         if local_map_radius > 0:
             radius = local_map_radius
-        return render_ascii_map(sim.world, sim.agent, radius=radius)
+        sim.selected_agent_index = self.selected_agent_index
+        return render_agent_arrays_map_model(
+            sim.world,
+            sim.agents,
+            sim.selected_agent_index,
+            radius=radius,
+            tick=sim.tick,
+            day=sim.tick // sim.config.ticks_per_day,
+            temperature_c=sim.current_weather.temperature_c,
+            is_raining=sim.current_weather.is_raining,
+            feels_cold=sim.current_weather.feels_cold,
+        )
 
-    @staticmethod
-    def _render_map_model(sim: Simulation, local_map_radius: int) -> RenderedMap:
-        radius: int | None = None
-        if local_map_radius > 0:
-            radius = local_map_radius
-        return render_map_model(sim.world, sim.agent, radius=radius)
+    def _update_roster(self, sim: Simulation) -> None:
+        if not self._frame_is_alive():
+            return
+        self.roster_ctrl.DeleteAllItems()
+        active_or_used = np.flatnonzero(
+            sim.agents.active | (sim.agent_ids > np.int64(0))
+        ).astype(np.int64)
+        memory_counts = _agent_memory_counts(sim)
+        for row_index, agent_index in enumerate(active_or_used):
+            action = ID_TO_ACTION.get(int(sim.agents.current_action[agent_index]))
+            goal = ID_TO_GOAL.get(int(sim.agents.current_goal[agent_index]))
+            action_value = "unknown" if action is None else action.value
+            goal_value = "unknown" if goal is None else goal.value
+            reason_value = ""
+            if int(sim.agents.death_reason[agent_index]) >= 0:
+                death_reason = ID_TO_DEATH.get(
+                    int(sim.agents.death_reason[agent_index])
+                )
+                reason_value = "unknown" if death_reason is None else death_reason.value
+            agent_id = int(sim.agent_ids[agent_index])
+            water_count, food_count = memory_counts.get(agent_id, (0, 0))
+            values = (
+                str(agent_id),
+                str(bool(sim.agents.active[agent_index])),
+                str(int(sim.agents.x[agent_index])),
+                str(int(sim.agents.y[agent_index])),
+                action_value,
+                goal_value,
+                f"{float(sim.agents.health[agent_index]):.2f}",
+                f"{float(sim.agents.thirst[agent_index]):.2f}",
+                f"{float(sim.agents.hunger[agent_index]):.2f}",
+                f"{float(sim.agents.fatigue[agent_index]):.2f}",
+                f"{float(sim.agents.cold_stress[agent_index]):.2f}",
+                str(int(sim.agents.distance_walked[agent_index])),
+                str(water_count),
+                str(food_count),
+                reason_value,
+            )
+            self.roster_ctrl.InsertItem(row_index, values[0])
+            for column_index, value in enumerate(values[1:], start=1):
+                self.roster_ctrl.SetItem(row_index, column_index, value)
+        self.selected_agent_ctrl.SetValue(
+            _selected_agent_detail(sim, self.selected_agent_index)
+        )
 
     def _update_ui(self, summary: str, rendered_map: RenderedMap | None) -> None:
         if not self._frame_is_alive():
@@ -592,14 +759,23 @@ class VillageSimFrame(wx.Frame):
         lines: list[str] = [
             f"Seed: {result.seed}",
             (
-                "Agents: "
-                f"initial={result.initial_agents} final_active={result.final_active_agents}"
+                "Population: "
+                f"initial={result.initial_agents} active={result.final_active_agents} "
+                f"dead={result.dead_agents}"
             ),
             f"Days elapsed: {result.days_elapsed:.2f}",
             f"Survived: {result.survived}",
             f"Death reason: {result.death_reason or 'n/a'}",
             (
-                "Final needs: "
+                "Active averages: "
+                f"health={result.active_average_health:.2f} "
+                f"thirst={result.active_average_thirst:.2f} "
+                f"hunger={result.active_average_hunger:.2f} "
+                f"fatigue={result.active_average_fatigue:.2f} "
+                f"cold={result.active_average_cold_stress:.2f}"
+            ),
+            (
+                "Primary agent final needs: "
                 f"health={result.final_health:.2f} thirst={result.final_thirst:.2f} "
                 f"hunger={result.final_hunger:.2f} fatigue={result.final_fatigue:.2f} "
                 f"cold_stress={result.final_cold_stress:.2f}"
@@ -610,7 +786,8 @@ class VillageSimFrame(wx.Frame):
                 f"remembered_water={result.remembered_water_sites} "
                 f"remembered_food={result.remembered_food_sites}"
             ),
-            f"Distance walked: {result.distance_walked}",
+            f"Total distance walked: {result.total_distance_walked}",
+            f"Average distance walked: {result.average_distance_walked:.1f}",
             (
                 "Final weather/cold: "
                 f"temp_c={result.final_temperature_c:.1f} "
@@ -618,24 +795,23 @@ class VillageSimFrame(wx.Frame):
                 f"sheltered={result.final_is_sheltered}"
             ),
             (
-                "Cold events: "
-                f"weather={result.cold_weather_events} "
-                f"status={result.cold_status_events} "
-                f"shelter={result.shelter_events}"
+                "Population events: "
+                f"cold={result.total_cold_events} shelter={result.total_shelter_events} "
+                f"deaths_by_reason={result.deaths_by_reason}"
             ),
             "Learning:",
             (
-                "  Water memories: "
-                f"{result.remembered_water_sites}, "
-                f"Food memories: {result.remembered_food_sites}"
+                "  Population memories: "
+                f"water={result.total_water_memories}, "
+                f"food={result.total_food_memories}"
             ),
             (
                 "  Memory-directed resource decisions: "
-                f"{result.learning.memory_directed_resource_ticks}"
+                f"{result.total_memory_directed_decisions}"
             ),
             (
                 "  Exploration-directed resource decisions: "
-                f"{result.learning.exploration_resource_ticks}"
+                f"{result.total_exploration_directed_decisions}"
             ),
             f"  Memory use ratio: {result.learning.memory_use_ratio:.2f}",
             (
@@ -656,6 +832,50 @@ class VillageSimFrame(wx.Frame):
         if replay is not None:
             lines.append(f"Wrote replay report: {replay}")
         return "\n".join(lines)
+
+
+def _agent_memory_counts(sim: Simulation) -> dict[int, tuple[int, int]]:
+    sim.global_memory.flush_pending()
+    if sim.global_memory.frame.is_empty():
+        return {}
+    grouped = (
+        sim.global_memory.frame.group_by([MEMORY_AGENT_ID, MEMORY_KIND])
+        .len()
+        .sort([MEMORY_AGENT_ID, MEMORY_KIND])
+    )
+    counts: dict[int, tuple[int, int]] = {}
+    for values in grouped.iter_rows(named=True):
+        agent_id = int(values[MEMORY_AGENT_ID])
+        kind = int(values[MEMORY_KIND])
+        count = int(values["len"])
+        water_count, food_count = counts.get(agent_id, (0, 0))
+        if kind == 1:
+            water_count = count
+        elif kind == 2:
+            food_count = count
+        counts[agent_id] = (water_count, food_count)
+    return counts
+
+
+def _selected_agent_detail(sim: Simulation, selected_agent_index: int) -> str:
+    if not (0 <= selected_agent_index < sim.agents.count):
+        return "Selected agent: none"
+    if int(sim.agent_ids[selected_agent_index]) <= 0:
+        return "Selected agent: none"
+    action = ID_TO_ACTION.get(int(sim.agents.current_action[selected_agent_index]))
+    goal = ID_TO_GOAL.get(int(sim.agents.current_goal[selected_agent_index]))
+    action_value = "unknown" if action is None else action.value
+    goal_value = "unknown" if goal is None else goal.value
+    return (
+        f"Selected agent id={int(sim.agent_ids[selected_agent_index])} "
+        f"x={int(sim.agents.x[selected_agent_index])} "
+        f"y={int(sim.agents.y[selected_agent_index])} goal={goal_value} "
+        f"action={action_value} health={float(sim.agents.health[selected_agent_index]):.2f} "
+        f"thirst={float(sim.agents.thirst[selected_agent_index]):.2f} "
+        f"hunger={float(sim.agents.hunger[selected_agent_index]):.2f} "
+        f"fatigue={float(sim.agents.fatigue[selected_agent_index]):.2f} "
+        f"cold={float(sim.agents.cold_stress[selected_agent_index]):.2f}"
+    )
 
 
 def main(initial_options: GuiInitialOptions | None = None) -> None:

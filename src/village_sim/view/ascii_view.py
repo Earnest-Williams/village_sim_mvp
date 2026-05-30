@@ -9,7 +9,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from village_sim.agent.state import AgentState
+import numpy as np
+from numpy.typing import NDArray
+
+from village_sim.agent.state import (
+    AgentArrays,
+    AgentState,
+    ID_TO_ACTION,
+    ID_TO_GOAL,
+    make_agent_arrays,
+    sync_agent_to_arrays,
+)
 from village_sim.core.types import ActionKind, Position, TerrainKind
 from village_sim.world.discoverables import DiscoverableKind
 from village_sim.world.grid import index_of, iter_neighbor_positions
@@ -38,6 +48,8 @@ class RenderedMap:
 ROLE_COLORS: dict[str, str] = {
     "agent": "#fff176",
     "agent_sleeping": "#d7b85b",
+    "agent_other": "#ffe082",
+    "agent_crowd": "#ffcc80",
     "water": "#4fc3f7",
     "broadleaf": "#66bb6a",
     "evergreen": "#2e7d32",
@@ -51,34 +63,101 @@ ROLE_COLORS: dict[str, str] = {
 }
 
 
-def render_map_model(
-    world: World, agent: AgentState, radius: int | None = None
+def render_agent_arrays_map_model(
+    world: World,
+    agents: AgentArrays,
+    selected_agent_index: int,
+    radius: int | None = None,
+    *,
+    tick: int = 0,
+    day: int = 0,
+    temperature_c: float = 0.0,
+    is_raining: bool = False,
+    feels_cold: bool = False,
 ) -> RenderedMap:
-    """Render a semantic top-down map model."""
+    """Render a semantic map model from population SoA state."""
 
+    active_mask: NDArray[np.bool_] = agents.active
+    selected_index: int = _selected_active_index(agents, selected_agent_index)
+    center_x: int = (
+        int(agents.x[selected_index]) if selected_index >= 0 else world.width // 2
+    )
+    center_y: int = (
+        int(agents.y[selected_index]) if selected_index >= 0 else world.height // 2
+    )
     min_x: int = 0
     max_x: int = world.width - 1
     min_y: int = 0
     max_y: int = world.height - 1
     if radius is not None:
-        min_x = max(0, agent.position.x - radius)
-        max_x = min(world.width - 1, agent.position.x + radius)
-        min_y = max(0, agent.position.y - radius)
-        max_y = min(world.height - 1, agent.position.y + radius)
+        min_x = max(0, center_x - radius)
+        max_x = min(world.width - 1, center_x + radius)
+        min_y = max(0, center_y - radius)
+        max_y = min(world.height - 1, center_y + radius)
+
+    world_size: int = world.width * world.height
+    active_tiles: NDArray[np.int64] = agents.y.astype(
+        np.int64
+    ) * world.width + agents.x.astype(np.int64)
+    active_rows: NDArray[np.int64] = np.flatnonzero(active_mask).astype(np.int64)
+    occupancy_counts: NDArray[np.int64] = np.bincount(
+        active_tiles[active_rows], minlength=world_size
+    ).astype(np.int64, copy=False)
+    selected_tile: int = -1
+    if selected_index >= 0 and bool(agents.active[selected_index]):
+        selected_tile = int(active_tiles[selected_index])
+    sleeping_tiles: NDArray[np.bool_] = np.zeros(world_size, dtype=np.bool_)
+    sleep_action_id: int = next(
+        action_id
+        for action_id, action in ID_TO_ACTION.items()
+        if action is ActionKind.SLEEP
+    )
+    sleeping_rows: NDArray[np.int64] = active_rows[
+        agents.current_action[active_rows] == np.int16(sleep_action_id)
+    ]
+    sleeping_tiles[active_tiles[sleeping_rows]] = True
 
     rows: list[list[MapGlyph]] = []
     for y in range(min_y, max_y + 1):
         row: list[MapGlyph] = []
         for x in range(min_x, max_x + 1):
-            row.append(_glyph_for_position(world, agent, Position(x=x, y=y)))
+            tile_index: int = y * world.width + x
+            row.append(
+                _glyph_for_population_position(
+                    world,
+                    Position(x=x, y=y),
+                    tile_index,
+                    occupancy_counts,
+                    sleeping_tiles,
+                    selected_tile,
+                )
+            )
         rows.append(row)
 
-    tile_scale: str = _format_tile_scale(world.tile_size_meters)
-    legend: str = (
-        "Legend: @ agent, z sleeping, ~ stream/water, * food/berries, "
-        '♣ broadleaf, ♠ evergreen, . short grass, , uneven grass, " brush, '
-        "; wetland/reeds, ^ hill/elevation, # rock, C cave | "
-        f"Scale: 1 tile ≈ {tile_scale} x {tile_scale}"
+    return RenderedMap(
+        status=_population_status(
+            agents,
+            selected_index,
+            tick=tick,
+            day=day,
+            temperature_c=temperature_c,
+            is_raining=is_raining,
+            feels_cold=feels_cold,
+        ),
+        legend=_legend(world),
+        rows=rows,
+    )
+
+
+def render_map_model(
+    world: World, agent: AgentState, radius: int | None = None
+) -> RenderedMap:
+    """Render a semantic top-down map model for one compatibility agent."""
+
+    arrays: AgentArrays = make_agent_arrays(1)
+    sync_agent_to_arrays(arrays, agent, 0)
+    rendered: RenderedMap = render_agent_arrays_map_model(
+        world, arrays, 0, radius=radius
     )
     decision_status: str = _decision_status(agent)
     status: str = (
@@ -88,7 +167,7 @@ def render_map_model(
         f"hunger={agent.hunger:.2f} fatigue={agent.fatigue:.2f}"
         f"{decision_status}"
     )
-    return RenderedMap(status=status, legend=legend, rows=rows)
+    return RenderedMap(status=status, legend=rendered.legend, rows=rendered.rows)
 
 
 def render_ascii_map(world: World, agent: AgentState, radius: int | None = None) -> str:
@@ -110,6 +189,83 @@ def rendered_map_to_text(rendered: RenderedMap) -> str:
     return "\n".join(lines)
 
 
+def _glyph_for_population_position(
+    world: World,
+    position: Position,
+    tile_index: int,
+    occupancy_counts: NDArray[np.int64],
+    sleeping_tiles: NDArray[np.bool_],
+    selected_tile: int,
+) -> MapGlyph:
+    occupant_count: int = int(occupancy_counts[tile_index])
+    if occupant_count > 1:
+        return _glyph("+", "agent_crowd")
+    if occupant_count == 1:
+        if bool(sleeping_tiles[tile_index]):
+            return _glyph("z", "agent_sleeping")
+        if tile_index == selected_tile:
+            return _glyph("@", "agent")
+        return _glyph("a", "agent_other")
+    return _terrain_glyph_for_position(world, position)
+
+
+def _selected_active_index(agents: AgentArrays, selected_agent_index: int) -> int:
+    if 0 <= selected_agent_index < agents.count and bool(
+        agents.active[selected_agent_index]
+    ):
+        return selected_agent_index
+    active_rows: NDArray[np.int64] = np.flatnonzero(agents.active).astype(np.int64)
+    if active_rows.size == 0:
+        return -1
+    return int(active_rows[0])
+
+
+def _population_status(
+    agents: AgentArrays,
+    selected_index: int,
+    *,
+    tick: int,
+    day: int,
+    temperature_c: float,
+    is_raining: bool,
+    feels_cold: bool,
+) -> str:
+    active_agents: int = int(np.count_nonzero(agents.active))
+    dead_agents: int = int(np.count_nonzero(agents.death_reason >= np.int16(0)))
+    village = (
+        f"Village: tick={tick} day={day} active={active_agents} dead={dead_agents} "
+        f"temp={temperature_c:.1f}C raining={is_raining} cold={feels_cold}"
+    )
+    if selected_index < 0:
+        return f"{village} | Selected agent: none"
+    action = ID_TO_ACTION.get(
+        int(agents.current_action[selected_index]), ActionKind.IDLE
+    )
+    goal = ID_TO_GOAL.get(int(agents.current_goal[selected_index]), None)
+    goal_value: str = "unknown" if goal is None else goal.value
+    selected = (
+        f"Selected agent: id={selected_index + 1} x={int(agents.x[selected_index])} "
+        f"y={int(agents.y[selected_index])} goal={goal_value} action={action.value} "
+        f"health={float(agents.health[selected_index]):.2f} "
+        f"thirst={float(agents.thirst[selected_index]):.2f} "
+        f"hunger={float(agents.hunger[selected_index]):.2f} "
+        f"fatigue={float(agents.fatigue[selected_index]):.2f} "
+        f"cold_stress={float(agents.cold_stress[selected_index]):.2f}"
+    )
+    return f"{village} | {selected}"
+
+
+def _legend(world: World) -> str:
+    tile_scale: str = _format_tile_scale(world.tile_size_meters)
+    return (
+        "Legend: @ selected agent, a active agent, z sleeping, + stacked agents, "
+        "~ stream/water, * food/berries, "
+        '♣ broadleaf, ♠ evergreen, . short grass, , uneven grass, " brush, '
+        "; wetland/reeds, ^ hill/elevation, # rock, C cave | "
+        f"Scale: 1 tile ≈ {tile_scale} x {tile_scale}"
+    )
+
+
 def _glyph_for_position(
     world: World, agent: AgentState, position: Position
 ) -> MapGlyph:
@@ -118,6 +274,10 @@ def _glyph_for_position(
             return _glyph("z", "agent_sleeping")
         return _glyph("@", "agent")
 
+    return _terrain_glyph_for_position(world, position)
+
+
+def _terrain_glyph_for_position(world: World, position: Position) -> MapGlyph:
     discoverable_glyph: MapGlyph | None = _discoverable_glyph_at(world, position)
     if discoverable_glyph is not None:
         return discoverable_glyph
