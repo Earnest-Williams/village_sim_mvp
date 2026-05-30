@@ -82,6 +82,7 @@ def unpack_object_hook(value: dict[str, Any]) -> object:
         ActionConfidence,
         CostModel,
         ExecutionPayload,
+        ExecutorType,
         SynthesizedAction,
         TargetBinding,
     )
@@ -113,7 +114,19 @@ def unpack_object_hook(value: dict[str, Any]) -> object:
     if type_name == "TargetBinding":
         return TargetBinding(**data)
     if type_name == "ExecutionPayload":
-        return ExecutionPayload(**data)
+        target_binding = data["target_binding"]
+        if not isinstance(target_binding, TargetBinding):
+            if not isinstance(target_binding, Mapping):
+                raise ValueError(
+                    "ExecutionPayload.target_binding must be a Mapping (e.g., dict)"
+                )
+            target_binding = TargetBinding(**dict(target_binding))
+        return ExecutionPayload(
+            type=ExecutorType(data["type"]),
+            policy_id=data["policy_id"],
+            policy_version=data["policy_version"],
+            target_binding=target_binding,
+        )
     if type_name == "CostModel":
         return CostModel(**data)
     if type_name == "ActionConfidence":
