@@ -6,7 +6,9 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import overload
 
+import numpy as np
 import polars as pl
+from numpy.typing import NDArray
 
 from village_sim.core.config import SimConfig
 from village_sim.core.types import Position, ResourceKind, ResourceSighting
@@ -184,6 +186,83 @@ class GlobalMemory:
             is_new = False
         self.queue_memory(agent_id, memory)
         return is_new
+
+    def observe_batch(
+        self,
+        *,
+        agent_ids: NDArray[np.int64],
+        tile_indices: NDArray[np.int64],
+        kind_ids: NDArray[np.int32],
+        amounts: NDArray[np.float64],
+        world_width: int,
+        tick: int,
+    ) -> None:
+        """Record batched resource sightings with one Polars upsert pass."""
+
+        frame = pl.DataFrame(
+            {
+                MEMORY_AGENT_ID: agent_ids,
+                "tile_index": tile_indices,
+                MEMORY_KIND: kind_ids,
+                MEMORY_LAST_AMOUNT: amounts,
+            }
+        ).filter(pl.col(MEMORY_AGENT_ID) > 0)
+        if frame.is_empty():
+            return
+
+        staged = (
+            frame.with_columns(
+                (pl.col("tile_index") % world_width).cast(pl.Int32).alias(MEMORY_X),
+                (pl.col("tile_index") // world_width).cast(pl.Int32).alias(MEMORY_Y),
+                (pl.col(MEMORY_KIND) + 1).cast(pl.Int8).alias(MEMORY_KIND),
+                pl.lit(tick, dtype=pl.Int64).alias(MEMORY_LAST_SEEN),
+                pl.lit(0.82, dtype=pl.Float32).alias(MEMORY_CONFIDENCE),
+                pl.col(MEMORY_LAST_AMOUNT).cast(pl.Float32),
+                pl.lit(0, dtype=pl.Int32).alias(MEMORY_SUCCESSFUL_USES),
+                pl.lit(0, dtype=pl.Int32).alias(MEMORY_FAILED_USES),
+                pl.lit(3, dtype=pl.Int32).alias(MEMORY_SEARCH_RADIUS),
+            )
+            .select(
+                [
+                    MEMORY_AGENT_ID,
+                    MEMORY_KIND,
+                    MEMORY_X,
+                    MEMORY_Y,
+                    MEMORY_CONFIDENCE,
+                    MEMORY_LAST_SEEN,
+                    MEMORY_LAST_AMOUNT,
+                    MEMORY_SUCCESSFUL_USES,
+                    MEMORY_FAILED_USES,
+                    MEMORY_SEARCH_RADIUS,
+                ]
+            )
+            .group_by([MEMORY_AGENT_ID, MEMORY_KIND, MEMORY_X, MEMORY_Y])
+            .agg(
+                pl.max(MEMORY_CONFIDENCE).alias(MEMORY_CONFIDENCE),
+                pl.max(MEMORY_LAST_SEEN).alias(MEMORY_LAST_SEEN),
+                pl.max(MEMORY_LAST_AMOUNT).alias(MEMORY_LAST_AMOUNT),
+                pl.max(MEMORY_SUCCESSFUL_USES).alias(MEMORY_SUCCESSFUL_USES),
+                pl.min(MEMORY_FAILED_USES).alias(MEMORY_FAILED_USES),
+                pl.max(MEMORY_SEARCH_RADIUS).alias(MEMORY_SEARCH_RADIUS),
+            )
+        )
+        row_count = staged.height
+        order_start = self._next_order
+        self._next_order += row_count
+        staged = staged.with_columns(
+            (pl.int_range(0, row_count, dtype=pl.Int64) + order_start).alias(
+                MEMORY_ORDER
+            )
+        ).cast(MEMORY_SCHEMA)
+
+        self.flush_pending()
+        combined = pl.concat([self.frame, staged], how="vertical")
+        unique = combined.unique(
+            subset=[MEMORY_AGENT_ID, MEMORY_KIND, MEMORY_X, MEMORY_Y],
+            keep="last",
+            maintain_order=True,
+        )
+        self.frame = self._enforce_capacity(unique)
 
     def queue_memory(self, agent_id: int, memory: ResourceMemory) -> None:
         key = _memory_key(agent_id, memory.kind, memory.position)
