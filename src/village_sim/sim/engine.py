@@ -164,6 +164,7 @@ class Simulation:
     _perception_out_amounts: NDArray[np.float64] = field(init=False)
     action_knowledge_frame: pl.DataFrame = field(init=False)
     economy: Economy = field(init=False)
+    agent_ids: NDArray[np.int64] = field(init=False)
 
     def __post_init__(self) -> None:
         self.config.validate()
@@ -181,6 +182,8 @@ class Simulation:
         self.agent.ensure_visit_buffer(self.world.width * self.world.height)
         self.agents = make_agent_arrays(MAX_AGENTS)
         self.agent_arrays = self.agents
+        self.agent_ids = np.zeros(MAX_AGENTS, dtype=np.int64)
+        self.agent_ids[0] = np.int64(self.agent.agent_id)
         sync_agent_to_arrays(self.agents, self.agent, 0)
         self.memory = AgentMemory(agent_id=self.agent.agent_id)
         self.discoverable_memory = DiscoverableAgentMemory()
@@ -225,6 +228,7 @@ class Simulation:
             return
 
         self.agents.active[free_slots] = True
+        self.agent_ids[free_slots] = np.asarray(free_slots + 1, dtype=np.int64)
         self.agents.x[free_slots] = np.int32(0)
         self.agents.y[free_slots] = np.asarray(
             (free_slots + tick) % self.world.height,
@@ -519,7 +523,7 @@ class Simulation:
         if global_memory is None:
             raise RuntimeError("global memory is not initialized")
         global_memory.observe_batch(
-            agent_ids=p_agent_ids + np.int64(1),
+            agent_ids=self.agent_ids[p_agent_ids],
             tile_indices=p_tiles,
             kind_ids=p_kinds,
             amounts=p_amounts,

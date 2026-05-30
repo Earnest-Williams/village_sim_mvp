@@ -71,6 +71,7 @@ class RegionActor:
             raise RuntimeError("simulation memory was not initialized")
         self.global_memory = global_memory
         self.expected_tick = 0
+        self.sim.agent_ids = self.agent_ids
 
     def advance_tick(self) -> dict[NeighborDelta, bytes]:
         """Advance one simulation tick and return departing agent byte payloads."""

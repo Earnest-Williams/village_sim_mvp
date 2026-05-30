@@ -206,7 +206,7 @@ class GlobalMemory:
                 MEMORY_KIND: kind_ids,
                 MEMORY_LAST_AMOUNT: amounts,
             }
-        )
+        ).filter(pl.col(MEMORY_AGENT_ID) > 0)
         if frame.is_empty():
             return
 
