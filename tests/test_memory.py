@@ -53,6 +53,19 @@ class MemoryTests(unittest.TestCase):
             food_memory.decayed_confidence(later_tick, config),
         )
 
+    def test_update_after_eviction_uses_consistent_lookup(self) -> None:
+        memory = AgentMemory(capacity=2)
+        memory.observe(ResourceSighting(Position(0, 0), ResourceKind.WATER, 1.0), tick=1)
+        memory.observe(ResourceSighting(Position(1, 1), ResourceKind.FOOD, 1.0), tick=2)
+        memory.observe(ResourceSighting(Position(2, 2), ResourceKind.WATER, 1.0), tick=3)
+
+        memory.observe(ResourceSighting(Position(1, 1), ResourceKind.FOOD, 0.25), tick=4)
+
+        self.assertEqual(len(memory.resource_memories), 2)
+        self.assertNotIn(Position(0, 0), [m.position for m in memory.resource_memories])
+        self.assertEqual(memory.resource_memories[0].position, Position(1, 1))
+        self.assertAlmostEqual(memory.resource_memories[0].last_amount, 0.25)
+
 
 if __name__ == "__main__":
     unittest.main()

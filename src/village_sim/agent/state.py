@@ -152,8 +152,12 @@ def sync_agent_from_arrays(arrays: AgentArrays, agent: AgentState, index: int) -
     agent.health = float(arrays.health[index])
     agent.awake_ticks = int(arrays.awake_ticks[index])
     agent.alive = bool(arrays.alive[index])
-    agent.current_goal = ID_TO_GOAL[int(arrays.current_goal[index])]
-    agent.current_action = ID_TO_ACTION[int(arrays.current_action[index])]
+    agent.current_goal = ID_TO_GOAL.get(
+        int(arrays.current_goal[index]), GoalKind.EXPLORE
+    )
+    agent.current_action = ID_TO_ACTION.get(
+        int(arrays.current_action[index]), ActionKind.IDLE
+    )
 
 
 def validate_arrays_match_dataclasses(
