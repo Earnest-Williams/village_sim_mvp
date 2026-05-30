@@ -41,11 +41,11 @@ AgentControlArrays: TypeAlias = tuple[
     NDArray[np.int16],
 ]
 AgentNeedArrays: TypeAlias = tuple[
-    NDArray[np.float64],
-    NDArray[np.float64],
-    NDArray[np.float64],
-    NDArray[np.float64],
-    NDArray[np.float64],
+    NDArray[np.float32],
+    NDArray[np.float32],
+    NDArray[np.float32],
+    NDArray[np.float32],
+    NDArray[np.float32],
 ]
 
 RATE_THIRST_GAIN = 0
@@ -339,39 +339,98 @@ def update_needs_arrays(
     is_sheltered: bool,
     is_cold_exposed: bool | None,
 ) -> None:
-    """Typed wrapper that feeds agent arrays into the Numba needs kernel."""
+    """Advance all active agent arrays with NumPy vectorized operations."""
+
+    active_mask: NDArray[np.bool_] = agent_arrays.active
+    if not bool(np.any(active_mask)):
+        return
+
+    thirst_gain: np.float32 = np.float32(config.thirst_gain_per_tick)
+    hunger_gain: np.float32 = np.float32(config.hunger_gain_per_tick)
+    agent_arrays.thirst[active_mask] = np.clip(
+        agent_arrays.thirst[active_mask] + thirst_gain,
+        np.float32(0.0),
+        np.float32(1.0),
+    )
+    agent_arrays.hunger[active_mask] = np.clip(
+        agent_arrays.hunger[active_mask] + hunger_gain,
+        np.float32(0.0),
+        np.float32(1.0),
+    )
+
+    sleep_mask: NDArray[np.bool_] = active_mask & (
+        agent_arrays.current_action == ACTION_TO_ID[ActionKind.SLEEP]
+    )
+    awake_mask: NDArray[np.bool_] = active_mask & ~sleep_mask
+    agent_arrays.fatigue[sleep_mask] = np.clip(
+        agent_arrays.fatigue[sleep_mask] - np.float32(config.fatigue_recovery_sleeping),
+        np.float32(0.0),
+        np.float32(1.0),
+    )
+    agent_arrays.fatigue[awake_mask] = np.clip(
+        agent_arrays.fatigue[awake_mask] + np.float32(config.fatigue_gain_awake),
+        np.float32(0.0),
+        np.float32(1.0),
+    )
+    agent_arrays.awake_ticks[awake_mask] += np.int32(1)
 
     cold_exposed: bool = is_night or is_raining
     if is_cold_exposed is not None:
         cold_exposed = is_cold_exposed
-    control_arrays: AgentControlArrays = (
-        agent_arrays.alive,
-        agent_arrays.awake_ticks,
-        agent_arrays.current_action,
+    if is_sheltered:
+        agent_arrays.cold_stress[active_mask] = np.clip(
+            agent_arrays.cold_stress[active_mask]
+            - np.float32(config.cold_recovery_shelter),
+            np.float32(0.0),
+            np.float32(1.0),
+        )
+    elif cold_exposed:
+        cold_delta: np.float32 = np.float32(0.0)
+        if is_night or not is_raining:
+            cold_delta = np.float32(cold_delta + np.float32(config.cold_gain_night))
+        if is_raining:
+            cold_delta = np.float32(cold_delta + np.float32(config.cold_gain_rain))
+        agent_arrays.cold_stress[active_mask] = np.clip(
+            agent_arrays.cold_stress[active_mask] + cold_delta,
+            np.float32(0.0),
+            np.float32(1.0),
+        )
+    else:
+        agent_arrays.cold_stress[active_mask] = np.clip(
+            agent_arrays.cold_stress[active_mask]
+            - np.float32(config.cold_recovery_daylight),
+            np.float32(0.0),
+            np.float32(1.0),
+        )
+
+    damage: NDArray[np.float32] = np.zeros(agent_arrays.count, dtype=np.float32)
+    damage += np.where(
+        active_mask & (agent_arrays.thirst >= np.float32(0.96)),
+        np.float32(0.025),
+        np.float32(0.0),
     )
-    need_arrays: AgentNeedArrays = (
-        agent_arrays.thirst,
-        agent_arrays.hunger,
-        agent_arrays.fatigue,
-        agent_arrays.cold_stress,
-        agent_arrays.health,
+    damage += np.where(
+        active_mask & (agent_arrays.hunger >= np.float32(0.96)),
+        np.float32(0.012),
+        np.float32(0.0),
     )
-    flags: NDArray[np.int32] = np.asarray(
-        (
-            ACTION_TO_ID[ActionKind.SLEEP],
-            int(is_night),
-            int(is_raining),
-            int(is_sheltered),
-            int(cold_exposed),
-        ),
-        dtype=np.int32,
+    damage += np.where(
+        active_mask & (agent_arrays.fatigue >= np.float32(0.98)),
+        np.float32(0.012),
+        np.float32(0.0),
     )
-    update_needs_batch(
-        control_arrays,
-        need_arrays,
-        flags,
-        _needs_kernel_rates(config),
+    damage += np.where(
+        active_mask
+        & (agent_arrays.cold_stress >= np.float32(config.cold_health_threshold)),
+        np.float32(config.cold_health_damage),
+        np.float32(0.0),
     )
+    agent_arrays.health[active_mask] = np.clip(
+        agent_arrays.health[active_mask] - damage[active_mask],
+        np.float32(0.0),
+        np.float32(1.0),
+    )
+    agent_arrays.active[active_mask & (agent_arrays.health <= np.float32(0.0))] = False
 
 
 @cache

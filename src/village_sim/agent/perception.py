@@ -8,6 +8,7 @@ import numpy as np
 from numba import njit
 from numpy.typing import NDArray
 
+from village_sim.agent.state import AgentArrays
 from village_sim.core.config import SimConfig
 from village_sim.core.time import SimClock
 from village_sim.core.types import Position, ResourceKind, ResourceSighting
@@ -299,4 +300,34 @@ def perceive(
         visible_food_indices=tile_indices[food_mask],
         visible_food_amounts=food_values[food_mask],
         world_width=world.width,
+    )
+
+
+def perceive_all(
+    agent_arrays: AgentArrays,
+    world: World,
+    clock: SimClock,
+    config: SimConfig,
+    out_agent_ids: NDArray[np.int64] | None = None,
+    out_tile_indices: NDArray[np.int64] | None = None,
+    out_kinds: NDArray[np.int32] | None = None,
+    out_amounts: NDArray[np.float64] | None = None,
+) -> tuple[
+    NDArray[np.int64], NDArray[np.int64], NDArray[np.int32], NDArray[np.float64]
+]:
+    """Perceive visible resources for all rows in AgentArrays as one batch."""
+
+    agent_ids: NDArray[np.int64] = np.arange(agent_arrays.count, dtype=np.int64)
+    return perceive_batch_resources(
+        agent_ids,
+        agent_arrays.x,
+        agent_arrays.y,
+        agent_arrays.active,
+        world,
+        clock,
+        config,
+        out_agent_ids,
+        out_tile_indices,
+        out_kinds,
+        out_amounts,
     )

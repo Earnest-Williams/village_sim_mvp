@@ -7,12 +7,34 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+import polars as pl
 from numpy.typing import NDArray
 
 from village_sim.msgpack_codec import pack_default, unpack_object_hook
 from village_sim.orchestrator.symbolic import FactValue
 
 MsgpackValue = FactValue | None | list["MsgpackValue"] | dict[str, "MsgpackValue"]
+
+
+ACTION_AGENT_ID = "agent_id"
+ACTION_SOURCE_AGENT_ID = "source_agent_id"
+ACTION_CONFIDENCE = "confidence"
+ACTION_ID = "action_id"
+ACTION_POLICY_ID = "policy_id"
+ACTION_KNOWLEDGE_TYPE = "knowledge_type"
+ACTION_MODEL_TYPE = "action_model"
+ACTION_TRANSFER_THRESHOLD = 0.2
+ACTION_TRANSFER_QUALITY = 1.0
+ACTION_SOURCE_TRUST = 0.85
+ACTION_KNOWLEDGE_SCHEMA: pl.Schema = pl.Schema(
+    {
+        ACTION_AGENT_ID: pl.Int64,
+        ACTION_SOURCE_AGENT_ID: pl.String,
+        ACTION_CONFIDENCE: pl.Float32,
+        ACTION_ID: pl.String,
+        ACTION_POLICY_ID: pl.String,
+    }
+)
 
 
 # ── Packet types (§20) ────────────────────────────────────────────────────────
@@ -187,3 +209,170 @@ def _validate_shape_axis(axis: object) -> int:
     if axis < 0:
         raise ValueError("Founder knowledge shape axes must be non-negative")
     return axis
+
+
+def action_packets_to_frame(
+    packets: list[dict[str, MsgpackValue]],
+    owner_agent_id: int,
+) -> pl.DataFrame:
+    """Load serialized ActionKnowledgePacket dictionaries into Polars memory."""
+
+    rows: list[dict[str, int | str | float]] = []
+    for packet in packets:
+        if packet.get(ACTION_KNOWLEDGE_TYPE) != ACTION_MODEL_TYPE:
+            continue
+        action_id: MsgpackValue | None = packet.get(ACTION_ID)
+        policy_id: MsgpackValue | None = packet.get(ACTION_POLICY_ID)
+        source_agent_id: MsgpackValue | None = packet.get(ACTION_SOURCE_AGENT_ID)
+        confidence: MsgpackValue | None = packet.get(ACTION_CONFIDENCE)
+        if not isinstance(action_id, str):
+            raise ValueError("action knowledge packets require string action_id")
+        if not isinstance(policy_id, str):
+            raise ValueError("action knowledge packets require string policy_id")
+        if not isinstance(source_agent_id, str):
+            raise ValueError("action knowledge packets require string source_agent_id")
+        if not isinstance(confidence, int | float):
+            raise ValueError("action knowledge packets require numeric confidence")
+        rows.append(
+            {
+                ACTION_AGENT_ID: owner_agent_id,
+                ACTION_SOURCE_AGENT_ID: source_agent_id,
+                ACTION_CONFIDENCE: float(confidence),
+                ACTION_ID: action_id,
+                ACTION_POLICY_ID: policy_id,
+            }
+        )
+    return pl.DataFrame(rows, schema=ACTION_KNOWLEDGE_SCHEMA, orient="row")
+
+
+def load_action_knowledge_frame(path: Path, owner_agent_id: int) -> pl.DataFrame:
+    """Load ActionKnowledgePacket rows from a MessagePack packet file."""
+
+    if not path.exists():
+        raise FileNotFoundError(path)
+    return action_packets_to_frame(load_packets(path), owner_agent_id)
+
+
+def seed_agent_action_knowledge(
+    frame: pl.DataFrame,
+    founder_agent_id: int,
+    new_agent_indices: NDArray[np.int64],
+    perturbations: NDArray[np.float32],
+) -> pl.DataFrame:
+    """Clone Founder action knowledge into spawned settler rows."""
+
+    if new_agent_indices.shape != perturbations.shape:
+        raise ValueError("settler indices and perturbations must share one shape")
+    founder_rows: pl.DataFrame = frame.filter(
+        pl.col(ACTION_AGENT_ID) == founder_agent_id
+    )
+    if founder_rows.is_empty() or new_agent_indices.size == 0:
+        return frame
+
+    settler_frame: pl.DataFrame = pl.DataFrame(
+        {
+            ACTION_AGENT_ID: new_agent_indices.astype(np.int64, copy=False),
+            "confidence_perturbation": perturbations.astype(np.float32, copy=False),
+        }
+    )
+    spawned_rows: pl.DataFrame = settler_frame.join(founder_rows, how="cross").select(
+        pl.col(ACTION_AGENT_ID),
+        pl.lit(str(founder_agent_id)).alias(ACTION_SOURCE_AGENT_ID),
+        (pl.col(ACTION_CONFIDENCE) + pl.col("confidence_perturbation"))
+        .clip(0.0, 1.0)
+        .cast(pl.Float32)
+        .alias(ACTION_CONFIDENCE),
+        pl.col(ACTION_ID),
+        pl.col(ACTION_POLICY_ID),
+    )
+    return pl.concat([frame, spawned_rows], how="vertical")
+
+
+def transfer_action_knowledge(
+    frame: pl.DataFrame,
+    teacher_idx: NDArray[np.int64],
+    learner_idx: NDArray[np.int64],
+    *,
+    trust_in_source: float = ACTION_SOURCE_TRUST,
+    transfer_quality: float = ACTION_TRANSFER_QUALITY,
+    confidence_margin: float = ACTION_TRANSFER_THRESHOLD,
+) -> pl.DataFrame:
+    """Vectorized action-confidence transfer for proximity-matched pairs."""
+
+    if teacher_idx.shape != learner_idx.shape:
+        raise ValueError("teacher and learner arrays must share one shape")
+    if teacher_idx.size == 0 or frame.is_empty():
+        return frame
+
+    pair_frame: pl.DataFrame = pl.DataFrame(
+        {
+            "teacher_agent_id": teacher_idx.astype(np.int64, copy=False),
+            "learner_agent_id": learner_idx.astype(np.int64, copy=False),
+        }
+    ).filter(pl.col("teacher_agent_id") != pl.col("learner_agent_id"))
+    if pair_frame.is_empty():
+        return frame
+
+    teacher_rows: pl.DataFrame = frame.rename(
+        {
+            ACTION_AGENT_ID: "teacher_agent_id",
+            ACTION_CONFIDENCE: "teacher_confidence",
+            ACTION_SOURCE_AGENT_ID: "teacher_source_agent_id",
+        }
+    )
+    learner_rows: pl.DataFrame = frame.rename(
+        {
+            ACTION_AGENT_ID: "learner_agent_id",
+            ACTION_CONFIDENCE: "learner_confidence",
+            ACTION_SOURCE_AGENT_ID: "learner_source_agent_id",
+        }
+    )
+    candidates: pl.DataFrame = (
+        pair_frame.join(teacher_rows, on="teacher_agent_id", how="inner")
+        .join(
+            learner_rows,
+            on=["learner_agent_id", ACTION_ID, ACTION_POLICY_ID],
+            how="left",
+        )
+        .with_columns(
+            pl.col("learner_confidence").fill_null(0.0),
+            (
+                pl.col("teacher_confidence")
+                * pl.lit(transfer_quality)
+                * pl.lit(trust_in_source)
+            )
+            .round(4)
+            .clip(0.0, 1.0)
+            .cast(pl.Float32)
+            .alias("imported_confidence"),
+        )
+        .filter(
+            pl.col("teacher_confidence")
+            > pl.col("learner_confidence") + pl.lit(confidence_margin)
+        )
+        .select(
+            pl.col("learner_agent_id").alias(ACTION_AGENT_ID),
+            pl.col("teacher_agent_id").cast(pl.String).alias(ACTION_SOURCE_AGENT_ID),
+            pl.col("imported_confidence").alias(ACTION_CONFIDENCE),
+            pl.col(ACTION_ID),
+            pl.col(ACTION_POLICY_ID),
+        )
+        .group_by([ACTION_AGENT_ID, ACTION_ID, ACTION_POLICY_ID])
+        .agg(
+            pl.col(ACTION_SOURCE_AGENT_ID).first(),
+            pl.col(ACTION_CONFIDENCE).max(),
+        )
+        .select(
+            ACTION_AGENT_ID,
+            ACTION_SOURCE_AGENT_ID,
+            ACTION_CONFIDENCE,
+            ACTION_ID,
+            ACTION_POLICY_ID,
+        )
+    )
+    if candidates.is_empty():
+        return frame
+
+    keys: list[str] = [ACTION_AGENT_ID, ACTION_ID, ACTION_POLICY_ID]
+    retained: pl.DataFrame = frame.join(candidates.select(keys), on=keys, how="anti")
+    return pl.concat([retained, candidates], how="vertical_relaxed").sort(keys)
