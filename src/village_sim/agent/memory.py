@@ -115,6 +115,10 @@ class ResourceMemory:
         return max(0.0, min(1.0, confidence))
 
 
+_AgentResourcePositionKey = tuple[int, int, int, int]
+_MemoryWithOrder = tuple[ResourceMemory, int]
+
+
 @dataclass(slots=True)
 class GlobalMemory:
     """Global resource memory table for all agents.
@@ -125,9 +129,9 @@ class GlobalMemory:
 
     capacity_per_agent: int = DEFAULT_MEMORY_CAPACITY
     frame: pl.DataFrame = field(default_factory=lambda: _empty_memory_frame())
-    _pending_dict: dict[
-        tuple[int, int, int, int], tuple[ResourceMemory, int]
-    ] = field(default_factory=dict)
+    _pending_dict: dict[_AgentResourcePositionKey, _MemoryWithOrder] = field(
+        default_factory=dict
+    )
     _next_order: int = 0
 
     def __post_init__(self) -> None:
@@ -196,23 +200,37 @@ class GlobalMemory:
     def flush_pending(self) -> None:
         if not self._pending_dict:
             return
-        rows = [
+        pending_items = list(self._pending_dict.items())
+        keys = [key for key, _ in pending_items]
+        staged_entries = [entry for _, entry in pending_items]
+        memories = [entry[0] for entry in staged_entries]
+        orders = [entry[1] for entry in staged_entries]
+        agent_ids = [key[0] for key in keys]
+        kind_ids = [key[1] for key in keys]
+        xs = [key[2] for key in keys]
+        ys = [key[3] for key in keys]
+        confidences = [memory.confidence for memory in memories]
+        last_seen = [memory.last_seen_tick for memory in memories]
+        last_amounts = [memory.last_amount for memory in memories]
+        successful_uses = [memory.successful_uses for memory in memories]
+        failed_uses = [memory.failed_uses for memory in memories]
+        search_radius = [memory.search_radius for memory in memories]
+        pending_df = pl.DataFrame(
             {
-                MEMORY_AGENT_ID: agent_id,
-                MEMORY_KIND: kind_id,
-                MEMORY_X: x,
-                MEMORY_Y: y,
-                MEMORY_CONFIDENCE: memory.confidence,
-                MEMORY_LAST_SEEN: memory.last_seen_tick,
-                MEMORY_LAST_AMOUNT: memory.last_amount,
-                MEMORY_SUCCESSFUL_USES: memory.successful_uses,
-                MEMORY_FAILED_USES: memory.failed_uses,
-                MEMORY_SEARCH_RADIUS: memory.search_radius,
-                MEMORY_ORDER: order,
-            }
-            for (agent_id, kind_id, x, y), (memory, order) in self._pending_dict.items()
-        ]
-        pending_df = pl.DataFrame(rows, schema=MEMORY_SCHEMA)
+                MEMORY_AGENT_ID: agent_ids,
+                MEMORY_KIND: kind_ids,
+                MEMORY_X: xs,
+                MEMORY_Y: ys,
+                MEMORY_CONFIDENCE: confidences,
+                MEMORY_LAST_SEEN: last_seen,
+                MEMORY_LAST_AMOUNT: last_amounts,
+                MEMORY_SUCCESSFUL_USES: successful_uses,
+                MEMORY_FAILED_USES: failed_uses,
+                MEMORY_SEARCH_RADIUS: search_radius,
+                MEMORY_ORDER: orders,
+            },
+            schema=MEMORY_SCHEMA,
+        )
         combined = pl.concat([self.frame, pending_df], how="vertical")
         unique = combined.unique(
             subset=[MEMORY_AGENT_ID, MEMORY_KIND, MEMORY_X, MEMORY_Y],
