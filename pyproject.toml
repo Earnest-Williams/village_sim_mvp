@@ -10,7 +10,13 @@ readme = "README.md"
 requires-python = ">=3.12"
 authors = [{ name = "Earnest Williams" }]
 license = { text = "MIT" }
-dependencies = ["msgpack>=1.0", "numba>=0.62", "numpy>=2.4", "polars>=1.41"]
+dependencies = [
+    "msgpack>=1.0",
+    "numba>=0.62",
+    "numpy>=2.4",
+    "polars>=1.41",
+    "ray>=2.9",
+]
 
 [project.optional-dependencies]
 gui = ["wxPython>=4.2"]
@@ -37,4 +43,8 @@ include = ["src", "tests"]
 
 [[tool.mypy.overrides]]
 module = "msgpack"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "ray"
 ignore_missing_imports = true

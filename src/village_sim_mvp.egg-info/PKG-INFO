@@ -10,6 +10,7 @@ Requires-Dist: msgpack>=1.0
 Requires-Dist: numba>=0.62
 Requires-Dist: numpy>=2.4
 Requires-Dist: polars>=1.41
+Requires-Dist: ray>=2.9
 Provides-Extra: gui
 Requires-Dist: wxPython>=4.2; extra == "gui"
 

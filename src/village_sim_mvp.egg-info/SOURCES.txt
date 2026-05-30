@@ -8,6 +8,7 @@ src/village_sim/run.py
 src/village_sim/agent/__init__.py
 src/village_sim/agent/actions.py
 src/village_sim/agent/decision.py
+src/village_sim/agent/handoff.py
 src/village_sim/agent/memory.py
 src/village_sim/agent/needs.py
 src/village_sim/agent/perception.py
@@ -38,6 +39,7 @@ src/village_sim/sim/event_summary.py
 src/village_sim/sim/events.py
 src/village_sim/sim/metrics.py
 src/village_sim/sim/profile.py
+src/village_sim/sim/region.py
 src/village_sim/sim/replay.py
 src/village_sim/sim/snapshot.py
 src/village_sim/view/__init__.py
