@@ -1,4 +1,4 @@
-"""Columnar agent memory model."""
+"""Fixed-capacity agent memory model."""
 
 from __future__ import annotations
 
@@ -37,6 +37,7 @@ MEMORY_CONFIDENCE = "confidence"
 MEMORY_SUCCESSFUL_USES = "successful_uses"
 MEMORY_FAILED_USES = "failed_uses"
 MEMORY_SEARCH_RADIUS = "search_radius"
+DEFAULT_MEMORY_CAPACITY = 512
 
 MEMORY_SCHEMA: dict[str, Any] = {
     MEMORY_AGENT_ID: pl.Int64,
@@ -76,19 +77,20 @@ class ResourceMemory:
             decay = age_days * config.food_memory_decay_per_day
         reliability_bonus: float = min(0.25, self.successful_uses * 0.04)
         failure_penalty: float = min(0.45, self.failed_uses * 0.08)
-        return max(
-            0.0, min(1.0, self.confidence + reliability_bonus - failure_penalty - decay)
+        confidence: float = (
+            self.confidence + reliability_bonus - failure_penalty - decay
         )
+        return max(0.0, min(1.0, confidence))
 
 
 class ResourceMemoryView(Sequence[ResourceMemory]):
-    """Compatibility sequence backed by AgentMemory's Polars DataFrame."""
+    """Compatibility sequence backed by AgentMemory's Python list."""
 
     def __init__(self, owner: AgentMemory) -> None:
         self._owner = owner
 
     def __len__(self) -> int:
-        return self._owner.frame.height
+        return self._owner.memory_count()
 
     @overload
     def __getitem__(self, index: int) -> ResourceMemory: ...
@@ -99,83 +101,86 @@ class ResourceMemoryView(Sequence[ResourceMemory]):
     def __getitem__(
         self, index: int | slice
     ) -> ResourceMemory | Sequence[ResourceMemory]:
-        if isinstance(index, slice):
-            start, stop, step = index.indices(len(self))
-            return [self[item] for item in range(start, stop, step)]
-        if index < 0:
-            index += len(self)
-        if not 0 <= index < len(self):
-            raise IndexError("resource memory index out of range")
-        row: pl.DataFrame = self._owner.frame.slice(index, 1)
-        return _resource_memory_from_frame(row)
+        return self._owner.memory_at(index)
 
     def __iter__(self) -> Iterator[ResourceMemory]:
-        for index in range(len(self)):
-            item = self[index]
-            if isinstance(item, ResourceMemory):
-                yield item
+        return self._owner.iter_memories()
 
     def append(self, memory: ResourceMemory) -> None:
-        self._owner._append_memory(memory)
+        self._owner.append_resource_memory(memory)
 
 
 @dataclass(slots=True)
 class AgentMemory:
-    """All learned facts for one agent, stored in a Polars DataFrame."""
+    """All learned facts for one agent, stored in a fixed-capacity list."""
 
     agent_id: int = 1
-    frame: pl.DataFrame = field(
-        default_factory=lambda: pl.DataFrame(schema=MEMORY_SCHEMA)
+    capacity: int = DEFAULT_MEMORY_CAPACITY
+    _memories: list[ResourceMemory] = field(
+        default_factory=lambda: list[ResourceMemory]()
     )
-    _lookup: dict[tuple[ResourceKind, int, int], bool] = field(default_factory=dict)
+    _lookup: dict[tuple[ResourceKind, int, int], int] = field(
+        default_factory=lambda: dict[tuple[ResourceKind, int, int], int]()
+    )
+
+    def __post_init__(self) -> None:
+        if self.capacity <= 0:
+            raise ValueError("memory capacity must be positive")
+        if len(self._memories) > self.capacity:
+            raise ValueError("initial memories cannot exceed memory capacity")
+        self._rebuild_lookup()
+
+    def memory_count(self) -> int:
+        return len(self._memories)
+
+    def memory_at(
+        self, index: int | slice
+    ) -> ResourceMemory | Sequence[ResourceMemory]:
+        return self._memories[index]
+
+    def iter_memories(self) -> Iterator[ResourceMemory]:
+        return iter(self._memories)
 
     @property
     def resource_memories(self) -> ResourceMemoryView:
         return ResourceMemoryView(self)
 
+    def export_to_dataframe(self) -> pl.DataFrame:
+        """Build a report-time Polars view of resource memory."""
+
+        rows: list[dict[str, int | float | str]] = []
+        for memory in self._memories:
+            rows.append(
+                {
+                    MEMORY_AGENT_ID: self.agent_id,
+                    MEMORY_KIND: memory.kind.value,
+                    MEMORY_X: memory.position.x,
+                    MEMORY_Y: memory.position.y,
+                    MEMORY_LAST_SEEN_TICK: memory.last_seen_tick,
+                    MEMORY_LAST_AMOUNT: memory.last_amount,
+                    MEMORY_CONFIDENCE: memory.confidence,
+                    MEMORY_SUCCESSFUL_USES: memory.successful_uses,
+                    MEMORY_FAILED_USES: memory.failed_uses,
+                    MEMORY_SEARCH_RADIUS: memory.search_radius,
+                }
+            )
+        return pl.DataFrame(rows, schema=MEMORY_SCHEMA, orient="row")
+
     def observe(self, sighting: ResourceSighting, tick: int) -> bool:
         """Record a sighting. Return True when this was a new location."""
 
         key: tuple[ResourceKind, int, int] = _key(sighting.kind, sighting.position)
-        if key in self._lookup:
-            amount_positive: bool = sighting.amount > 0.0
-            failure_expr: pl.Expr = pl.col(MEMORY_FAILED_USES)
-            if amount_positive:
-                failure_expr = (pl.col(MEMORY_FAILED_USES) - 1).clip(0, None)
-            self.frame = self.frame.with_columns(
-                pl.when(
-                    _memory_key_expr(self.agent_id, sighting.kind, sighting.position)
-                )
-                .then(tick)
-                .otherwise(pl.col(MEMORY_LAST_SEEN_TICK))
-                .alias(MEMORY_LAST_SEEN_TICK),
-                pl.when(
-                    _memory_key_expr(self.agent_id, sighting.kind, sighting.position)
-                )
-                .then(sighting.amount)
-                .otherwise(pl.col(MEMORY_LAST_AMOUNT))
-                .alias(MEMORY_LAST_AMOUNT),
-                pl.when(
-                    _memory_key_expr(self.agent_id, sighting.kind, sighting.position)
-                )
-                .then(
-                    (
-                        pl.max_horizontal(pl.col(MEMORY_CONFIDENCE), pl.lit(0.50))
-                        + 0.12
-                    ).clip(0.0, 1.0)
-                )
-                .otherwise(pl.col(MEMORY_CONFIDENCE))
-                .alias(MEMORY_CONFIDENCE),
-                pl.when(
-                    _memory_key_expr(self.agent_id, sighting.kind, sighting.position)
-                )
-                .then(failure_expr)
-                .otherwise(pl.col(MEMORY_FAILED_USES))
-                .alias(MEMORY_FAILED_USES),
-            )
+        index: int | None = self._lookup.get(key)
+        if index is not None:
+            memory: ResourceMemory = self._memories[index]
+            memory.last_seen_tick = tick
+            memory.last_amount = sighting.amount
+            memory.confidence = min(1.0, max(memory.confidence, 0.50) + 0.12)
+            if sighting.amount > 0.0:
+                memory.failed_uses = max(0, memory.failed_uses - 1)
             return False
 
-        self._append_memory(
+        self.append_resource_memory(
             ResourceMemory(
                 position=sighting.position,
                 kind=sighting.kind,
@@ -189,8 +194,9 @@ class AgentMemory:
     def mark_success(
         self, kind: ResourceKind, position: Position, tick: int, amount: float
     ) -> None:
-        if _key(kind, position) not in self._lookup:
-            self._append_memory(
+        index: int | None = self._lookup.get(_key(kind, position))
+        if index is None:
+            self.append_resource_memory(
                 ResourceMemory(
                     position=position,
                     kind=kind,
@@ -201,56 +207,23 @@ class AgentMemory:
                 )
             )
             return
-        key_expr: pl.Expr = _memory_key_expr(self.agent_id, kind, position)
-        self.frame = self.frame.with_columns(
-            pl.when(key_expr)
-            .then(tick)
-            .otherwise(pl.col(MEMORY_LAST_SEEN_TICK))
-            .alias(MEMORY_LAST_SEEN_TICK),
-            pl.when(key_expr)
-            .then(amount)
-            .otherwise(pl.col(MEMORY_LAST_AMOUNT))
-            .alias(MEMORY_LAST_AMOUNT),
-            pl.when(key_expr)
-            .then((pl.col(MEMORY_CONFIDENCE) + 0.16).clip(0.0, 1.0))
-            .otherwise(pl.col(MEMORY_CONFIDENCE))
-            .alias(MEMORY_CONFIDENCE),
-            pl.when(key_expr)
-            .then(pl.col(MEMORY_SUCCESSFUL_USES) + 1)
-            .otherwise(pl.col(MEMORY_SUCCESSFUL_USES))
-            .alias(MEMORY_SUCCESSFUL_USES),
-            pl.when(key_expr)
-            .then((pl.col(MEMORY_FAILED_USES) - 1).clip(0, None))
-            .otherwise(pl.col(MEMORY_FAILED_USES))
-            .alias(MEMORY_FAILED_USES),
-        )
+        memory: ResourceMemory = self._memories[index]
+        memory.last_seen_tick = tick
+        memory.last_amount = amount
+        memory.confidence = min(1.0, memory.confidence + 0.16)
+        memory.successful_uses += 1
+        memory.failed_uses = max(0, memory.failed_uses - 1)
 
     def mark_failure(self, kind: ResourceKind, position: Position, tick: int) -> None:
-        if _key(kind, position) not in self._lookup:
+        index: int | None = self._lookup.get(_key(kind, position))
+        if index is None:
             return
-        key_expr: pl.Expr = _memory_key_expr(self.agent_id, kind, position)
-        self.frame = self.frame.with_columns(
-            pl.when(key_expr)
-            .then(tick)
-            .otherwise(pl.col(MEMORY_LAST_SEEN_TICK))
-            .alias(MEMORY_LAST_SEEN_TICK),
-            pl.when(key_expr)
-            .then(0.0)
-            .otherwise(pl.col(MEMORY_LAST_AMOUNT))
-            .alias(MEMORY_LAST_AMOUNT),
-            pl.when(key_expr)
-            .then((pl.col(MEMORY_CONFIDENCE) - 0.24).clip(0.0, 1.0))
-            .otherwise(pl.col(MEMORY_CONFIDENCE))
-            .alias(MEMORY_CONFIDENCE),
-            pl.when(key_expr)
-            .then(pl.col(MEMORY_FAILED_USES) + 1)
-            .otherwise(pl.col(MEMORY_FAILED_USES))
-            .alias(MEMORY_FAILED_USES),
-            pl.when(key_expr)
-            .then((pl.col(MEMORY_SEARCH_RADIUS) + 1).clip(None, 10))
-            .otherwise(pl.col(MEMORY_SEARCH_RADIUS))
-            .alias(MEMORY_SEARCH_RADIUS),
-        )
+        memory: ResourceMemory = self._memories[index]
+        memory.last_seen_tick = tick
+        memory.last_amount = 0.0
+        memory.confidence = max(0.0, memory.confidence - 0.24)
+        memory.failed_uses += 1
+        memory.search_radius = min(10, memory.search_radius + 1)
 
     def best_memory(
         self,
@@ -259,132 +232,62 @@ class AgentMemory:
         tick: int,
         config: SimConfig,
     ) -> ResourceMemory | None:
-        filtered: pl.DataFrame = self.frame.filter(
-            (pl.col(MEMORY_AGENT_ID) == self.agent_id)
-            & (pl.col(MEMORY_KIND) == kind.value)
-        )
-        if filtered.is_empty():
-            return None
+        best: ResourceMemory | None = None
+        best_score: float = -1_000_000.0
+        for memory in self._memories:
+            if memory.kind is not kind:
+                continue
+            decayed_confidence: float = memory.decayed_confidence(tick, config)
+            if decayed_confidence <= 0.08:
+                continue
+            amount_bonus: float = min(0.25, max(0.0, memory.last_amount * 0.12))
+            distance_penalty: float = current.distance_to(memory.position) * 0.025
+            score: float = decayed_confidence + amount_bonus - distance_penalty
+            if _is_better_memory(score, memory, best_score, best):
+                best = memory
+                best_score = score
+        return best
 
-        decay_per_day: float = config.water_memory_decay_per_day
-        if kind is ResourceKind.FOOD:
-            decay_per_day = config.food_memory_decay_per_day
-        age_days: pl.Expr = (tick - pl.col(MEMORY_LAST_SEEN_TICK)).clip(
-            0, None
-        ) / float(config.ticks_per_day)
-        confidence: pl.Expr = (
-            pl.col(MEMORY_CONFIDENCE)
-            + (pl.col(MEMORY_SUCCESSFUL_USES) * 0.04).clip(0.0, 0.25)
-            - (pl.col(MEMORY_FAILED_USES) * 0.08).clip(0.0, 0.45)
-            - age_days * decay_per_day
-        ).clip(0.0, 1.0)
-        dx: pl.Expr = (pl.col(MEMORY_X) - current.x).cast(pl.Float64)
-        dy: pl.Expr = (pl.col(MEMORY_Y) - current.y).cast(pl.Float64)
-        distance: pl.Expr = (dx.pow(2) + dy.pow(2)).sqrt()
-        scored: pl.DataFrame = (
-            filtered.with_columns(
-                confidence.alias("decayed_confidence"),
-                (pl.col(MEMORY_LAST_AMOUNT) * 0.12)
-                .clip(0.0, 0.25)
-                .alias("amount_bonus"),
-                distance.alias("distance"),
-            )
-            .with_columns(
-                (
-                    pl.col("decayed_confidence")
-                    + pl.col("amount_bonus")
-                    - pl.col("distance") * 0.025
-                ).alias("score")
-            )
-            .filter(pl.col("decayed_confidence") > 0.08)
-            .sort(["score", MEMORY_X, MEMORY_Y], descending=[True, False, False])
-            .limit(1)
-        )
-        if scored.is_empty():
-            return None
-        return _resource_memory_from_frame(scored)
+    def append_resource_memory(self, memory: ResourceMemory) -> None:
+        key: tuple[ResourceKind, int, int] = _key(memory.kind, memory.position)
+        existing_index: int | None = self._lookup.get(key)
+        if existing_index is not None:
+            self._memories[existing_index] = memory
+            return
+        if len(self._memories) >= self.capacity:
+            removed: ResourceMemory = self._memories.pop(0)
+            del self._lookup[_key(removed.kind, removed.position)]
+            self._rebuild_lookup()
+        self._lookup[key] = len(self._memories)
+        self._memories.append(memory)
 
-    def _append_memory(self, memory: ResourceMemory) -> None:
-        row: pl.DataFrame = pl.DataFrame(
-            [
-                {
-                    MEMORY_AGENT_ID: self.agent_id,
-                    MEMORY_KIND: memory.kind.value,
-                    MEMORY_X: memory.position.x,
-                    MEMORY_Y: memory.position.y,
-                    MEMORY_LAST_SEEN_TICK: memory.last_seen_tick,
-                    MEMORY_LAST_AMOUNT: memory.last_amount,
-                    MEMORY_CONFIDENCE: memory.confidence,
-                    MEMORY_SUCCESSFUL_USES: memory.successful_uses,
-                    MEMORY_FAILED_USES: memory.failed_uses,
-                    MEMORY_SEARCH_RADIUS: memory.search_radius,
-                }
-            ],
-            schema=MEMORY_SCHEMA,
-            orient="row",
-        )
-        self.frame.extend(row)
-        self._lookup[_key(memory.kind, memory.position)] = True
+    def _rebuild_lookup(self) -> None:
+        self._lookup.clear()
+        for index, memory in enumerate(self._memories):
+            key: tuple[ResourceKind, int, int] = _key(memory.kind, memory.position)
+            if key in self._lookup:
+                raise ValueError("initial memories cannot contain duplicate locations")
+            self._lookup[key] = index
 
 
 def _key(kind: ResourceKind, position: Position) -> tuple[ResourceKind, int, int]:
     return (kind, position.x, position.y)
 
 
-def _memory_key_expr(agent_id: int, kind: ResourceKind, position: Position) -> pl.Expr:
-    return (
-        (pl.col(MEMORY_AGENT_ID) == agent_id)
-        & (pl.col(MEMORY_KIND) == kind.value)
-        & (pl.col(MEMORY_X) == position.x)
-        & (pl.col(MEMORY_Y) == position.y)
-    )
-
-
-def _resource_memory_from_frame(frame: pl.DataFrame) -> ResourceMemory:
-    if frame.height != 1:
-        raise ValueError("resource memory frame must contain exactly one row")
-    values: dict[str, list[Any]] = frame.to_dict(as_series=False)
-    return ResourceMemory(
-        position=Position(
-            _required_int(values, MEMORY_X),
-            _required_int(values, MEMORY_Y),
-        ),
-        kind=ResourceKind(_required_str(values, MEMORY_KIND)),
-        last_seen_tick=_required_int(values, MEMORY_LAST_SEEN_TICK),
-        last_amount=_required_float(values, MEMORY_LAST_AMOUNT),
-        confidence=_required_float(values, MEMORY_CONFIDENCE),
-        successful_uses=_required_int(values, MEMORY_SUCCESSFUL_USES),
-        failed_uses=_required_int(values, MEMORY_FAILED_USES),
-        search_radius=_required_int(values, MEMORY_SEARCH_RADIUS),
-    )
-
-
-def _required_value(values: dict[str, list[Any]], key: str) -> Any:
-    column: list[Any] | None = values.get(key)
-    if column is None or len(column) != 1:
-        raise ValueError(f"memory frame missing scalar column: {key}")
-    value: Any = column[0]
-    if value is None:
-        raise ValueError(f"memory frame column cannot be null: {key}")
-    return value
-
-
-def _required_int(values: dict[str, list[Any]], key: str) -> int:
-    value: Any = _required_value(values, key)
-    if not isinstance(value, int):
-        raise TypeError(f"memory frame column must be int: {key}")
-    return value
-
-
-def _required_float(values: dict[str, list[Any]], key: str) -> float:
-    value: Any = _required_value(values, key)
-    if not isinstance(value, float):
-        raise TypeError(f"memory frame column must be float: {key}")
-    return value
-
-
-def _required_str(values: dict[str, list[Any]], key: str) -> str:
-    value: Any = _required_value(values, key)
-    if not isinstance(value, str):
-        raise TypeError(f"memory frame column must be str: {key}")
-    return value
+def _is_better_memory(
+    score: float,
+    memory: ResourceMemory,
+    best_score: float,
+    best: ResourceMemory | None,
+) -> bool:
+    if best is None:
+        return True
+    if score > best_score:
+        return True
+    if score < best_score:
+        return False
+    if memory.position.x < best.position.x:
+        return True
+    if memory.position.x > best.position.x:
+        return False
+    return memory.position.y < best.position.y

@@ -6,26 +6,33 @@ import random
 from dataclasses import dataclass, field
 from time import perf_counter
 
-import polars as pl
-
 from village_sim.agent.decision import DecisionSource
 from village_sim.agent.memory import (
     AgentMemory,
     DiscoverableAgentMemory,
     ResourceMemory,
 )
-from village_sim.agent.needs import (
-    agent_frame_from_states,
-    sync_agent_from_frame,
-    sync_agent_to_frame,
-    update_needs_frame,
-)
+from village_sim.agent.needs import update_needs_arrays
 from village_sim.agent.perception import Observation, perceive
 from village_sim.agent.policy import choose_and_execute_action
-from village_sim.agent.state import AgentState, MemoryMarker
+from village_sim.agent.state import (
+    AgentArrays,
+    AgentState,
+    MemoryMarker,
+    agent_arrays_from_states,
+    sync_agent_from_arrays,
+    sync_agent_to_arrays,
+    validate_arrays_match_dataclasses,
+)
 from village_sim.core.config import SimConfig
 from village_sim.core.time import SimClock, clock_from_tick
-from village_sim.core.types import ActionKind, Position, PrimitiveAction, ResourceKind
+from village_sim.core.types import (
+    ActionKind,
+    DeathReason,
+    Position,
+    PrimitiveAction,
+    ResourceKind,
+)
 from village_sim.goap.executor import ExecutionResult, PlanExecutor
 from village_sim.goap.planner import PlanStep, plan
 from village_sim.orchestrator.action_model import (
@@ -76,7 +83,17 @@ from village_sim.world.weather import (
     WeatherState,
     make_weather_state,
 )
+from village_sim.world.water_system import WaterSystemState
 from village_sim.world.world import World, choose_spawn_position, generate_world
+
+
+@dataclass(slots=True)
+class SimulationState:
+    """Data-oriented runtime container for hot-loop state."""
+
+    agent_arrays: AgentArrays
+    world: World
+    water_system: WaterSystemState
 
 
 @dataclass(slots=True)
@@ -91,7 +108,8 @@ class Simulation:
     rng: random.Random = field(init=False)
     world: World = field(init=False)
     agent: AgentState = field(init=False)
-    agent_frame: pl.DataFrame = field(init=False)
+    agent_arrays: AgentArrays = field(init=False)
+    state: SimulationState = field(init=False)
     memory: AgentMemory = field(init=False)
     discoverable_memory: DiscoverableAgentMemory = field(init=False)
     orchestrator: Orchestrator = field(init=False)
@@ -130,7 +148,7 @@ class Simulation:
         spawn_position = choose_spawn_position(self.world, self.rng)
         self.agent = AgentState(agent_id=1, position=spawn_position)
         self.agent.ensure_visit_buffer(self.world.width * self.world.height)
-        self.agent_frame = agent_frame_from_states([self.agent])
+        self.agent_arrays = agent_arrays_from_states([self.agent])
         self.memory = AgentMemory(agent_id=self.agent.agent_id)
         self.discoverable_memory = DiscoverableAgentMemory()
         self.orchestrator = Orchestrator()
@@ -141,14 +159,23 @@ class Simulation:
             is_night=initial_clock.is_night,
             config=self.config,
         )
+        self.state = SimulationState(
+            agent_arrays=self.agent_arrays,
+            world=self.world,
+            water_system=self.world.water_system,
+        )
+        validate_arrays_match_dataclasses(self.agent_arrays, [self.agent])
         self._log("spawn", "agent spawned")
         self._log_weather_transition(self.current_weather)
 
-    def _sync_agent_cache_to_frame(self) -> None:
-        self.agent_frame = sync_agent_to_frame(self.agent_frame, self.agent)
+    def _sync_agent_cache_to_arrays(self) -> None:
+        sync_agent_to_arrays(self.agent_arrays, self.agent, 0)
 
-    def _sync_agent_cache_from_frame(self) -> None:
-        sync_agent_from_frame(self.agent_frame, self.agent)
+    def _sync_agent_cache_from_arrays(self) -> None:
+        was_alive: bool = self.agent.alive
+        sync_agent_from_arrays(self.agent_arrays, self.agent, 0)
+        if was_alive and not self.agent.alive:
+            self.agent.death_reason = self._death_reason_from_arrays(0)
 
     def _update_agent_needs(
         self,
@@ -158,16 +185,25 @@ class Simulation:
         is_sheltered: bool = False,
         is_cold_exposed: bool | None = None,
     ) -> None:
-        self._sync_agent_cache_to_frame()
-        self.agent_frame = update_needs_frame(
-            self.agent_frame,
+        self._sync_agent_cache_to_arrays()
+        update_needs_arrays(
+            self.agent_arrays,
             self.config,
             is_night=is_night,
             is_raining=is_raining,
             is_sheltered=is_sheltered,
             is_cold_exposed=is_cold_exposed,
         )
-        self._sync_agent_cache_from_frame()
+        self._sync_agent_cache_from_arrays()
+
+    def _death_reason_from_arrays(self, index: int) -> DeathReason:
+        needs: dict[DeathReason, float] = {
+            DeathReason.THIRST: float(self.agent_arrays.thirst[index]),
+            DeathReason.HUNGER: float(self.agent_arrays.hunger[index]),
+            DeathReason.EXHAUSTION: float(self.agent_arrays.fatigue[index]),
+            DeathReason.COLD: float(self.agent_arrays.cold_stress[index]),
+        }
+        return max(needs, key=lambda reason: needs[reason])
 
     def step(self) -> None:
         if self.tick >= self.config.max_ticks():

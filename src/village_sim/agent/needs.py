@@ -1,13 +1,17 @@
-"""Vectorized need and health updates."""
+"""Agent need and health updates."""
 
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Any
+from functools import cache
+from typing import Any, TypeAlias
 
+import numpy as np
 import polars as pl
+from numba import njit
+from numpy.typing import NDArray
 
-from village_sim.agent.state import AgentState
+from village_sim.agent.state import ACTION_TO_ID, AgentArrays, AgentState
 from village_sim.core.config import SimConfig
 from village_sim.core.types import ActionKind, DeathReason, Position
 
@@ -30,22 +34,53 @@ DISTANCE_WALKED = "distance_walked"
 WATER_DISCOVERIES = "water_discoveries"
 FOOD_DISCOVERIES = "food_discoveries"
 
+
+AgentControlArrays: TypeAlias = tuple[
+    NDArray[np.bool_],
+    NDArray[np.int32],
+    NDArray[np.int16],
+]
+AgentNeedArrays: TypeAlias = tuple[
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+]
+
+RATE_THIRST_GAIN = 0
+RATE_HUNGER_GAIN = 1
+RATE_FATIGUE_GAIN_AWAKE = 2
+RATE_FATIGUE_RECOVERY_SLEEPING = 3
+RATE_COLD_GAIN_NIGHT = 4
+RATE_COLD_GAIN_RAIN = 5
+RATE_COLD_RECOVERY_DAYLIGHT = 6
+RATE_COLD_RECOVERY_SHELTER = 7
+RATE_COLD_HEALTH_THRESHOLD = 8
+RATE_COLD_HEALTH_DAMAGE = 9
+
+FLAG_SLEEP_ACTION_ID = 0
+FLAG_IS_NIGHT = 1
+FLAG_IS_RAINING = 2
+FLAG_IS_SHELTERED = 3
+FLAG_IS_COLD_EXPOSED = 4
+
 AGENT_SCHEMA: dict[str, Any] = {
     AGENT_ID: pl.Int64,
-    X: pl.Int64,
-    Y: pl.Int64,
+    X: pl.Int32,
+    Y: pl.Int32,
     THIRST: pl.Float64,
     HUNGER: pl.Float64,
     FATIGUE: pl.Float64,
     COLD_STRESS: pl.Float64,
     HEALTH: pl.Float64,
-    AWAKE_TICKS: pl.Int64,
+    AWAKE_TICKS: pl.Int32,
     ALIVE: pl.Boolean,
     DEATH_REASON: pl.String,
     CURRENT_GOAL: pl.String,
     CURRENT_ACTION: pl.String,
-    TARGET_X: pl.Int64,
-    TARGET_Y: pl.Int64,
+    TARGET_X: pl.Int32,
+    TARGET_Y: pl.Int32,
     DISTANCE_WALKED: pl.Int64,
     WATER_DISCOVERIES: pl.Int64,
     FOOD_DISCOVERIES: pl.Int64,
@@ -53,7 +88,7 @@ AGENT_SCHEMA: dict[str, Any] = {
 
 
 def agent_frame_from_states(agents: Iterable[AgentState]) -> pl.DataFrame:
-    """Build the centralized columnar source of truth for agent state."""
+    """Build a report-time columnar view of agent state."""
 
     rows: list[dict[str, int | float | bool | str | None]] = []
     for agent in agents:
@@ -88,32 +123,23 @@ def agent_frame_from_states(agents: Iterable[AgentState]) -> pl.DataFrame:
 
 
 def sync_agent_to_frame(frame: pl.DataFrame, agent: AgentState) -> pl.DataFrame:
-    """Replace one agent row in the centralized DataFrame from compatibility state."""
+    """Replace one agent row in a report-time DataFrame."""
 
     replacement: pl.DataFrame = agent_frame_from_states([agent])
     if frame.is_empty():
         return replacement
-    if frame.height == 1:
-        existing_id: int = int(frame.get_column(AGENT_ID).item())
-        if existing_id == agent.agent_id:
-            return replacement
     survivors: pl.DataFrame = frame.filter(pl.col(AGENT_ID) != agent.agent_id)
     return pl.concat([survivors, replacement], how="vertical").sort(AGENT_ID)
 
 
 def sync_agent_from_frame(frame: pl.DataFrame, agent: AgentState) -> None:
-    """Refresh the compatibility AgentState cache from the centralized DataFrame."""
+    """Refresh a compatibility AgentState from a report-time DataFrame."""
 
-    row: pl.DataFrame = frame
-    if frame.height != 1 or int(frame.get_column(AGENT_ID).item()) != agent.agent_id:
-        row = frame.filter(pl.col(AGENT_ID) == agent.agent_id)
+    row: pl.DataFrame = frame.filter(pl.col(AGENT_ID) == agent.agent_id)
     if row.height != 1:
         raise ValueError("agent frame must contain exactly one row for agent_id")
     values: dict[str, list[Any]] = row.to_dict(as_series=False)
-    agent.position = Position(
-        x=_required_int(values, X),
-        y=_required_int(values, Y),
-    )
+    agent.position = Position(x=_required_int(values, X), y=_required_int(values, Y))
     agent.thirst = _required_float(values, THIRST)
     agent.hunger = _required_float(values, HUNGER)
     agent.fatigue = _required_float(values, FATIGUE)
@@ -155,191 +181,102 @@ def update_needs_frame(
     is_sheltered: bool = False,
     is_cold_exposed: bool | None = None,
 ) -> pl.DataFrame:
-    """Advance biological needs for all live agents with Polars expressions."""
+    """Advance biological needs for report-time compatibility DataFrames."""
 
-    if frame.height == 1:
-        return _update_single_agent_needs_frame(
-            frame,
+    rows: list[dict[str, int | float | bool | str | None]] = []
+    for values in frame.iter_rows(named=True):
+        agent = AgentState(
+            agent_id=int(values[AGENT_ID]),
+            position=Position(int(values[X]), int(values[Y])),
+            thirst=float(values[THIRST]),
+            hunger=float(values[HUNGER]),
+            fatigue=float(values[FATIGUE]),
+            cold_stress=float(values[COLD_STRESS]),
+            health=float(values[HEALTH]),
+            awake_ticks=int(values[AWAKE_TICKS]),
+            alive=bool(values[ALIVE]),
+            death_reason=_death_reason_from_value(values[DEATH_REASON]),
+            current_action=ActionKind(str(values[CURRENT_ACTION])),
+        )
+        update_needs(
+            agent,
             config,
             is_night=is_night,
             is_raining=is_raining,
             is_sheltered=is_sheltered,
             is_cold_exposed=is_cold_exposed,
         )
+        agent_frame = agent_frame_from_states([agent])
+        rows.extend(agent_frame.iter_rows(named=True))
+    return pl.DataFrame(rows, schema=AGENT_SCHEMA, orient="row")
 
-    cold_exposed: bool = is_night or is_raining
-    if is_cold_exposed is not None:
-        cold_exposed = is_cold_exposed
 
-    cold_delta: float = -config.cold_recovery_daylight
-    if is_sheltered:
-        cold_delta = -config.cold_recovery_shelter
-    elif cold_exposed:
-        cold_delta = 0.0
-        if is_night or not is_raining:
-            cold_delta += config.cold_gain_night
-        if is_raining:
-            cold_delta += config.cold_gain_rain
+@njit(cache=True)
+def update_needs_batch(
+    control_arrays: AgentControlArrays,
+    need_arrays: AgentNeedArrays,
+    flags: NDArray[np.int32],
+    rates: NDArray[np.float64],
+) -> None:
+    """Advance all live agents' continuous needs in a Numba kernel."""
 
-    awake_expr: pl.Expr = pl.col(CURRENT_ACTION) != ActionKind.SLEEP.value
-    live_expr: pl.Expr = pl.col(ALIVE)
-    thirst_damage: pl.Expr = pl.when(pl.col(THIRST) >= 0.96).then(0.025).otherwise(0.0)
-    hunger_damage: pl.Expr = pl.when(pl.col(HUNGER) >= 0.96).then(0.012).otherwise(0.0)
-    fatigue_damage: pl.Expr = (
-        pl.when(pl.col(FATIGUE) >= 0.98).then(0.012).otherwise(0.0)
-    )
-    cold_damage: pl.Expr = (
-        pl.when(pl.col(COLD_STRESS) >= config.cold_health_threshold)
-        .then(config.cold_health_damage)
-        .otherwise(0.0)
-    )
-    newly_dead: pl.Expr = pl.col(HEALTH) <= 0.0
-    max_need: pl.Expr = pl.max_horizontal(
-        pl.col(THIRST), pl.col(HUNGER), pl.col(FATIGUE), pl.col(COLD_STRESS)
-    )
-    death_reason: pl.Expr = (
-        pl.when(pl.col(THIRST) == max_need)
-        .then(pl.lit(DeathReason.THIRST.value))
-        .when(pl.col(HUNGER) == max_need)
-        .then(pl.lit(DeathReason.HUNGER.value))
-        .when(pl.col(FATIGUE) == max_need)
-        .then(pl.lit(DeathReason.EXHAUSTION.value))
-        .otherwise(pl.lit(DeathReason.COLD.value))
-    )
-
-    return (
-        frame.lazy()
-        .with_columns(
-            pl.when(live_expr)
-            .then(pl.col(THIRST) + config.thirst_gain_per_tick)
-            .otherwise(pl.col(THIRST))
-            .clip(0.0, 1.0)
-            .alias(THIRST),
-            pl.when(live_expr)
-            .then(pl.col(HUNGER) + config.hunger_gain_per_tick)
-            .otherwise(pl.col(HUNGER))
-            .clip(0.0, 1.0)
-            .alias(HUNGER),
-            pl.when(live_expr & awake_expr)
-            .then(pl.col(FATIGUE) + config.fatigue_gain_awake)
-            .when(live_expr)
-            .then(pl.col(FATIGUE) - config.fatigue_recovery_sleeping)
-            .otherwise(pl.col(FATIGUE))
-            .clip(0.0, 1.0)
-            .alias(FATIGUE),
-            pl.when(live_expr & awake_expr)
-            .then(pl.col(AWAKE_TICKS) + 1)
-            .otherwise(pl.col(AWAKE_TICKS))
-            .alias(AWAKE_TICKS),
-            pl.when(live_expr)
-            .then(pl.col(COLD_STRESS) + cold_delta)
-            .otherwise(pl.col(COLD_STRESS))
-            .clip(0.0, 1.0)
-            .alias(COLD_STRESS),
-        )
-        .with_columns(
-            pl.when(pl.col(ALIVE))
-            .then(
-                pl.col(HEALTH)
-                - thirst_damage
-                - hunger_damage
-                - fatigue_damage
-                - cold_damage
+    alive, awake_ticks, current_action = control_arrays
+    thirst, hunger, fatigue, cold_stress, health = need_arrays
+    sleep_action_id: int = int(flags[FLAG_SLEEP_ACTION_ID])
+    is_night: bool = bool(flags[FLAG_IS_NIGHT])
+    is_raining: bool = bool(flags[FLAG_IS_RAINING])
+    is_sheltered: bool = bool(flags[FLAG_IS_SHELTERED])
+    cold_exposed: bool = bool(flags[FLAG_IS_COLD_EXPOSED])
+    for index in range(alive.shape[0]):
+        if not alive[index]:
+            continue
+        thirst[index] = _clip01(thirst[index] + rates[RATE_THIRST_GAIN])
+        hunger[index] = _clip01(hunger[index] + rates[RATE_HUNGER_GAIN])
+        if int(current_action[index]) == sleep_action_id:
+            fatigue[index] = _clip01(
+                fatigue[index] - rates[RATE_FATIGUE_RECOVERY_SLEEPING]
             )
-            .otherwise(pl.col(HEALTH))
-            .clip(0.0, 1.0)
-            .alias(HEALTH)
-        )
-        .with_columns(
-            pl.when(newly_dead).then(False).otherwise(pl.col(ALIVE)).alias(ALIVE),
-            pl.when(newly_dead)
-            .then(death_reason)
-            .otherwise(pl.col(DEATH_REASON))
-            .alias(DEATH_REASON),
-        )
-        .collect()
-    )
+        else:
+            fatigue[index] = _clip01(fatigue[index] + rates[RATE_FATIGUE_GAIN_AWAKE])
+            awake_ticks[index] += 1
+
+        if is_sheltered:
+            cold_stress[index] = _clip01(
+                cold_stress[index] - rates[RATE_COLD_RECOVERY_SHELTER]
+            )
+        elif cold_exposed:
+            cold_delta: float = 0.0
+            if is_night or not is_raining:
+                cold_delta += rates[RATE_COLD_GAIN_NIGHT]
+            if is_raining:
+                cold_delta += rates[RATE_COLD_GAIN_RAIN]
+            cold_stress[index] = _clip01(cold_stress[index] + cold_delta)
+        else:
+            cold_stress[index] = _clip01(
+                cold_stress[index] - rates[RATE_COLD_RECOVERY_DAYLIGHT]
+            )
+
+        damage: float = 0.0
+        if thirst[index] >= 0.96:
+            damage += 0.025
+        if hunger[index] >= 0.96:
+            damage += 0.012
+        if fatigue[index] >= 0.98:
+            damage += 0.012
+        if cold_stress[index] >= rates[RATE_COLD_HEALTH_THRESHOLD]:
+            damage += rates[RATE_COLD_HEALTH_DAMAGE]
+        health[index] = _clip01(health[index] - damage)
+        if health[index] <= 0.0:
+            alive[index] = False
 
 
-def _update_single_agent_needs_frame(
-    frame: pl.DataFrame,
-    config: SimConfig,
-    *,
-    is_night: bool,
-    is_raining: bool,
-    is_sheltered: bool,
-    is_cold_exposed: bool | None,
-) -> pl.DataFrame:
-    values: dict[str, list[Any]] = frame.to_dict(as_series=False)
-    if not _required_bool(values, ALIVE):
-        return frame
-
-    thirst: float = min(
-        1.0,
-        max(0.0, _required_float(values, THIRST) + config.thirst_gain_per_tick),
-    )
-    hunger: float = min(
-        1.0,
-        max(0.0, _required_float(values, HUNGER) + config.hunger_gain_per_tick),
-    )
-    fatigue: float = _required_float(values, FATIGUE)
-    awake_ticks: int = _required_int(values, AWAKE_TICKS)
-    if _required_str(values, CURRENT_ACTION) == ActionKind.SLEEP.value:
-        fatigue -= config.fatigue_recovery_sleeping
-    else:
-        fatigue += config.fatigue_gain_awake
-        awake_ticks += 1
-    fatigue = min(1.0, max(0.0, fatigue))
-
-    cold_exposed: bool = is_night or is_raining
-    if is_cold_exposed is not None:
-        cold_exposed = is_cold_exposed
-    cold_stress: float = _required_float(values, COLD_STRESS)
-    if is_sheltered:
-        cold_stress -= config.cold_recovery_shelter
-    elif cold_exposed:
-        if is_night or not is_raining:
-            cold_stress += config.cold_gain_night
-        if is_raining:
-            cold_stress += config.cold_gain_rain
-    else:
-        cold_stress -= config.cold_recovery_daylight
-    cold_stress = min(1.0, max(0.0, cold_stress))
-
-    health: float = _required_float(values, HEALTH)
-    if thirst >= 0.96:
-        health -= 0.025
-    if hunger >= 0.96:
-        health -= 0.012
-    if fatigue >= 0.98:
-        health -= 0.012
-    if cold_stress >= config.cold_health_threshold:
-        health -= config.cold_health_damage
-    health = min(1.0, max(0.0, health))
-
-    alive: bool = health > 0.0
-    death_reason: str | None = _nullable_str(values, DEATH_REASON)
-    if not alive:
-        severe_needs: dict[str, float] = {
-            DeathReason.THIRST.value: thirst,
-            DeathReason.HUNGER.value: hunger,
-            DeathReason.EXHAUSTION.value: fatigue,
-            DeathReason.COLD.value: cold_stress,
-        }
-        death_reason = max(severe_needs, key=lambda reason: severe_needs[reason])
-
-    row: dict[str, int | float | bool | str | None] = {
-        key: column[0] for key, column in values.items()
-    }
-    row[THIRST] = thirst
-    row[HUNGER] = hunger
-    row[FATIGUE] = fatigue
-    row[COLD_STRESS] = cold_stress
-    row[HEALTH] = health
-    row[AWAKE_TICKS] = awake_ticks
-    row[ALIVE] = alive
-    row[DEATH_REASON] = death_reason
-    return pl.DataFrame([row], schema=AGENT_SCHEMA, orient="row")
+@njit(cache=True)
+def _clip01(value: float) -> float:
+    if value < 0.0:
+        return 0.0
+    if value > 1.0:
+        return 1.0
+    return value
 
 
 def update_needs(
@@ -351,18 +288,125 @@ def update_needs(
     is_sheltered: bool = False,
     is_cold_exposed: bool | None = None,
 ) -> None:
-    """Advance one compatibility AgentState via the Polars batch path."""
+    """Advance one compatibility AgentState with standard Python floats."""
 
-    frame: pl.DataFrame = agent_frame_from_states([agent])
-    updated: pl.DataFrame = update_needs_frame(
-        frame,
-        config,
-        is_night=is_night,
-        is_raining=is_raining,
-        is_sheltered=is_sheltered,
-        is_cold_exposed=is_cold_exposed,
+    if not agent.alive:
+        return
+    agent.thirst = min(1.0, max(0.0, agent.thirst + config.thirst_gain_per_tick))
+    agent.hunger = min(1.0, max(0.0, agent.hunger + config.hunger_gain_per_tick))
+    if agent.current_action is ActionKind.SLEEP:
+        agent.fatigue -= config.fatigue_recovery_sleeping
+    else:
+        agent.fatigue += config.fatigue_gain_awake
+        agent.awake_ticks += 1
+    agent.fatigue = min(1.0, max(0.0, agent.fatigue))
+
+    cold_exposed: bool = is_night or is_raining
+    if is_cold_exposed is not None:
+        cold_exposed = is_cold_exposed
+    if is_sheltered:
+        agent.cold_stress -= config.cold_recovery_shelter
+    elif cold_exposed:
+        if is_night or not is_raining:
+            agent.cold_stress += config.cold_gain_night
+        if is_raining:
+            agent.cold_stress += config.cold_gain_rain
+    else:
+        agent.cold_stress -= config.cold_recovery_daylight
+    agent.cold_stress = min(1.0, max(0.0, agent.cold_stress))
+
+    if agent.thirst >= 0.96:
+        agent.health -= 0.025
+    if agent.hunger >= 0.96:
+        agent.health -= 0.012
+    if agent.fatigue >= 0.98:
+        agent.health -= 0.012
+    if agent.cold_stress >= config.cold_health_threshold:
+        agent.health -= config.cold_health_damage
+    agent.health = min(1.0, max(0.0, agent.health))
+
+    if agent.health <= 0.0:
+        agent.alive = False
+        agent.death_reason = _most_severe_death_reason(agent)
+
+
+def update_needs_arrays(
+    agent_arrays: AgentArrays,
+    config: SimConfig,
+    *,
+    is_night: bool,
+    is_raining: bool,
+    is_sheltered: bool,
+    is_cold_exposed: bool | None,
+) -> None:
+    """Typed wrapper that feeds agent arrays into the Numba needs kernel."""
+
+    cold_exposed: bool = is_night or is_raining
+    if is_cold_exposed is not None:
+        cold_exposed = is_cold_exposed
+    control_arrays: AgentControlArrays = (
+        agent_arrays.alive,
+        agent_arrays.awake_ticks,
+        agent_arrays.current_action,
     )
-    sync_agent_from_frame(updated, agent)
+    need_arrays: AgentNeedArrays = (
+        agent_arrays.thirst,
+        agent_arrays.hunger,
+        agent_arrays.fatigue,
+        agent_arrays.cold_stress,
+        agent_arrays.health,
+    )
+    flags: NDArray[np.int32] = np.asarray(
+        (
+            ACTION_TO_ID[ActionKind.SLEEP],
+            int(is_night),
+            int(is_raining),
+            int(is_sheltered),
+            int(cold_exposed),
+        ),
+        dtype=np.int32,
+    )
+    update_needs_batch(
+        control_arrays,
+        need_arrays,
+        flags,
+        _needs_kernel_rates(config),
+    )
+
+
+@cache
+def _needs_kernel_rates(config: SimConfig) -> NDArray[np.float64]:
+    return np.asarray(
+        (
+            config.thirst_gain_per_tick,
+            config.hunger_gain_per_tick,
+            config.fatigue_gain_awake,
+            config.fatigue_recovery_sleeping,
+            config.cold_gain_night,
+            config.cold_gain_rain,
+            config.cold_recovery_daylight,
+            config.cold_recovery_shelter,
+            config.cold_health_threshold,
+            config.cold_health_damage,
+        ),
+        dtype=np.float64,
+    )
+
+
+def _most_severe_death_reason(agent: AgentState) -> DeathReason:
+    severe_needs: dict[DeathReason, float] = {
+        DeathReason.THIRST: agent.thirst,
+        DeathReason.HUNGER: agent.hunger,
+        DeathReason.EXHAUSTION: agent.fatigue,
+        DeathReason.COLD: agent.cold_stress,
+    }
+    return max(severe_needs, key=lambda reason: severe_needs[reason])
+
+
+def _death_reason_from_value(value: object) -> DeathReason | None:
+    if value is None:
+        return None
+    return DeathReason(str(value))
 
 
 def _required_value(values: dict[str, list[Any]], key: str) -> Any:
@@ -384,25 +428,25 @@ def _nullable_value(values: dict[str, list[Any]], key: str) -> Any | None:
 
 def _required_int(values: dict[str, list[Any]], key: str) -> int:
     value: Any = _required_value(values, key)
-    if not isinstance(value, int):
-        raise TypeError(f"agent frame column must be int: {key}")
-    return value
+    if isinstance(value, int):
+        return value
+    raise TypeError(f"agent frame column must be int: {key}")
 
 
 def _nullable_int(values: dict[str, list[Any]], key: str) -> int | None:
     value: Any | None = _nullable_value(values, key)
     if value is None:
         return None
-    if not isinstance(value, int):
-        raise TypeError(f"agent frame column must be int or null: {key}")
-    return value
+    if isinstance(value, int):
+        return value
+    raise TypeError(f"agent frame column must be int or null: {key}")
 
 
 def _required_float(values: dict[str, list[Any]], key: str) -> float:
     value: Any = _required_value(values, key)
-    if not isinstance(value, float):
-        raise TypeError(f"agent frame column must be float: {key}")
-    return value
+    if isinstance(value, float):
+        return value
+    raise TypeError(f"agent frame column must be float: {key}")
 
 
 def _required_bool(values: dict[str, list[Any]], key: str) -> bool:
