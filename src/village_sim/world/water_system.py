@@ -220,10 +220,11 @@ def step_sampled_rain(
         1,
         int(float(len(state.outdoor_indices)) * event.profile.sample_fraction),
     )
-    for _ in range(sample_count):
-        sampled_index: int = state.outdoor_indices[
-            rng.randrange(len(state.outdoor_indices))
-        ]
+    sampled_indices: list[int] = rng.sample(
+        state.outdoor_indices,
+        min(len(state.outdoor_indices), sample_count),
+    )
+    for sampled_index in sampled_indices:
         if state.catchment[sampled_index]:
             water[sampled_index] = min(
                 config.max_surface_water_depth,
@@ -295,7 +296,7 @@ def step_active_water_flow(
     state.fluid_active.clear()
     state.flood_active.clear()
 
-    for index in active_indices:
+    for index in sorted(active_indices):
         current_water: float = water[index]
 
         if state.permanent_water[index]:
@@ -423,13 +424,17 @@ def _move_downhill_or_sideways(
             return True
 
     best_spread: int = -1
-    best_depth: float = water[index]
+    best_surface: float = current_surface
     for neighbor_index in state.neighbors4[index]:
         if height_map[neighbor_index] > height_map[index] + config.sideways_height_slop:
             continue
-        if water[neighbor_index] < best_depth:
+        neighbor_surface: float = (
+            height_map[neighbor_index]
+            + water[neighbor_index] * config.water_height_scale
+        )
+        if neighbor_surface < best_surface:
             best_spread = neighbor_index
-            best_depth = water[neighbor_index]
+            best_surface = neighbor_surface
 
     if best_spread < 0:
         return False

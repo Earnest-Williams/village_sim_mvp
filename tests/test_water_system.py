@@ -99,6 +99,28 @@ class SampledRainTests(unittest.TestCase):
         self.assertAlmostEqual(water[0], 0.81)
         self.assertIn(0, state.fluid_active)
 
+    def test_sampling_without_replacement_covers_all_tiles(self) -> None:
+        terrain = [int(TerrainKind.ROCK), int(TerrainKind.ROCK)]
+        water = [0.0, 0.0]
+        state = build_water_system_state(
+            width=2, height=1, terrain=terrain, water=water
+        )
+        event = RainEvent(
+            replace(_test_profile(), sample_fraction=1.0, puddle_rate=1.0),
+            1,
+        )
+
+        step_sampled_rain(
+            rng=random.Random(1),
+            water=water,
+            state=state,
+            event=event,
+            config=SimConfig(),
+        )
+
+        self.assertGreater(water[0], 0.0)
+        self.assertGreater(water[1], 0.0)
+
 
 class ActiveWaterFlowTests(unittest.TestCase):
     def test_water_moves_to_lower_height_neighbor(self) -> None:
@@ -153,6 +175,23 @@ class ActiveWaterFlowTests(unittest.TestCase):
 
         self.assertEqual(water, [0.0, 1.0])
         self.assertEqual(state.soil_water, [0.0, 0.0])
+
+    def test_sideways_flow_does_not_move_water_uphill_surface(self) -> None:
+        terrain = [int(TerrainKind.GRASS), int(TerrainKind.GRASS)]
+        water = [0.20, 0.0]
+        state = build_water_system_state(
+            width=2, height=1, terrain=terrain, water=water
+        )
+        state.fluid_active.add(0)
+
+        step_active_water_flow(
+            water=water,
+            height_map=[0.0, 0.009],
+            state=state,
+            config=SimConfig(),
+        )
+
+        self.assertEqual(water[1], 0.0)
 
     def test_permanent_water_below_bankfull_does_not_flow(self) -> None:
         terrain = [int(TerrainKind.WATER), int(TerrainKind.GRASS)]
