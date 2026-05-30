@@ -59,7 +59,7 @@ class Economy:
         np.add.at(total_due_by_buyer, buyer_indices, values)
 
         buyer_total_due: NDArray[np.float32] = total_due_by_buyer[buyer_indices]
-        safe_due: NDArray[np.float32] = np.maximum(buyer_total_due, np.float32(1.0))
+        safe_due: NDArray[np.float32] = np.where(buyer_total_due > 0.0, buyer_total_due, np.float32(1.0))
         buyer_payment_budget: NDArray[np.float32] = np.minimum(
             self.wealth[buyer_indices], buyer_total_due
         ).astype(np.float32, copy=False)
