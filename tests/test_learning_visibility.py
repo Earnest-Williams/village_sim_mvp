@@ -195,10 +195,10 @@ class LearningVisibilityTests(unittest.TestCase):
         water_marker = rendered.rows[2][2]
         food_marker = rendered.rows[2][3]
 
-        self.assertNotIn(water_marker.role, {"remembered_water", "stale_memory"})
-        self.assertNotIn(food_marker.role, {"remembered_food", "stale_memory"})
-        self.assertNotIn(water_marker.char, {"w", "W", "?"})
-        self.assertNotIn(food_marker.char, {"f", "F", "?"})
+        self.assertIn(water_marker.role, {'grass', 'brush'})
+        self.assertIn(food_marker.role, {'grass', 'brush'})
+        self.assertIn(water_marker.char, {'.', ',', '\"'})
+        self.assertIn(food_marker.char, {'.', ',', '\"'})
         self.assertEqual(rendered.rows[1][1].char, "@")
 
     def test_replay_snapshot_decision_fields(self) -> None:
