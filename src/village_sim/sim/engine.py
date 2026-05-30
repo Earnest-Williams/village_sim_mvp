@@ -322,8 +322,6 @@ class Simulation:
                     ),
                     sighting.position,
                 )
-        self._sync_memory_markers()
-
         new_discoverable_ids: list[str] = update_discoverable_memory(
             self.discoverable_memory,
             observation.discoverables,
@@ -348,6 +346,7 @@ class Simulation:
             clock, observation
         )
         if interaction_ticks > 0:
+            self._sync_memory_markers()
             update_needs(
                 self.agent,
                 self.config,
@@ -765,10 +764,10 @@ class Simulation:
         for memory in self.memory.resource_memories:
             key = (memory.kind.value, memory.position.x, memory.position.y)
             before_successes, before_failures = before_state.get(key, (0, 0))
-            confidence = self._format_confidence(
-                memory.decayed_confidence(self.tick, self.config)
-            )
             if memory.successful_uses > before_successes:
+                confidence = self._format_confidence(
+                    memory.decayed_confidence(self.tick, self.config)
+                )
                 if memory.kind is ResourceKind.WATER:
                     self.learning.memory_reinforced_water += (
                         memory.successful_uses - before_successes
@@ -783,6 +782,9 @@ class Simulation:
                     memory.position,
                 )
             if memory.failed_uses > before_failures:
+                confidence = self._format_confidence(
+                    memory.decayed_confidence(self.tick, self.config)
+                )
                 if memory.kind is ResourceKind.WATER:
                     self.learning.memory_failed_water += (
                         memory.failed_uses - before_failures
