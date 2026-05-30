@@ -7,7 +7,6 @@ from typing import Any
 
 import numpy as np
 import ray
-from numpy.typing import NDArray
 
 from village_sim.agent.handoff import (
     RegionBounds,
@@ -32,6 +31,7 @@ class RegionTickResult:
     tick: int
     active_agents: int
     outgoing_agents: int
+    outgoing_payloads: dict[NeighborDelta, bytes]
 
 
 @ray.remote
@@ -72,6 +72,19 @@ class RegionActor:
         self.global_memory = global_memory
         self.expected_tick = 0
 
+    def advance_tick(self) -> dict[NeighborDelta, bytes]:
+        """Advance one simulation tick and return departing agent byte payloads."""
+
+        self.sim.step()
+        outgoing = group_departing_agents_by_neighbor(
+            self.sim.agents,
+            self.global_memory,
+            self.bounds,
+            self.agent_ids,
+        )
+        self.expected_tick += 1
+        return outgoing
+
     def tick(
         self,
         expected_tick: int,
@@ -81,30 +94,24 @@ class RegionActor:
 
         if expected_tick != self.expected_tick:
             raise ValueError("region heartbeat tick mismatch")
-        self.sim.step()
-        outgoing = group_departing_agents_by_neighbor(
-            self.sim.agents,
-            self.global_memory,
-            self.bounds,
-            self.agent_ids,
-        )
+        outgoing = self.advance_tick()
         outgoing_count = 0
         for delta, buffer in outgoing.items():
-            outgoing_count += int(buffer.size > 0)
+            outgoing_count += int(len(buffer) > 0)
             target_actor = neighbor_actors.get(delta)
             if target_actor is not None:
                 target_actor.receive_agents.remote(buffer)
-        self.expected_tick += 1
         active_agents = int(np.count_nonzero(self.sim.agents.active))
         return RegionTickResult(
             region_id=self.region_id,
             tick=self.expected_tick,
             active_agents=active_agents,
             outgoing_agents=outgoing_count,
+            outgoing_payloads=outgoing,
         )
 
-    def receive_agents(self, buffer: NDArray[np.uint8]) -> int:
-        """Receive a MessagePack handoff buffer from an adjacent region actor."""
+    def receive_agents(self, buffer: bytes) -> int:
+        """Receive a MessagePack handoff byte string from an adjacent actor."""
 
         return receive_agent_handoff(
             self.sim.agents,

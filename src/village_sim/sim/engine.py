@@ -18,7 +18,10 @@ from village_sim.agent.memory import (
     ResourceMemory,
 )
 from village_sim.agent.needs import update_needs_arrays
-from village_sim.agent.social import compute_social_interactions
+from village_sim.agent.social import (
+    compute_social_interactions,
+    compute_trade_opportunities,
+)
 from village_sim.agent.perception import (
     Observation,
     max_resource_sightings,
@@ -64,6 +67,7 @@ from village_sim.orchestrator.orchestrator import Orchestrator
 from village_sim.orchestrator.snapshotting import make_state_snapshot
 from village_sim.orchestrator.symbolic import FactValue, extract_symbolic_state
 from village_sim.orchestrator.trajectory import Trajectory, TrajectoryRecorder
+from village_sim.sim.economy import Economy
 from village_sim.sim.event_summary import (
     count_cold_status_events,
     count_cold_weather_events,
@@ -159,6 +163,7 @@ class Simulation:
     _perception_out_kinds: NDArray[np.int32] = field(init=False)
     _perception_out_amounts: NDArray[np.float64] = field(init=False)
     action_knowledge_frame: pl.DataFrame = field(init=False)
+    economy: Economy = field(init=False)
 
     def __post_init__(self) -> None:
         self.config.validate()
@@ -182,6 +187,7 @@ class Simulation:
         self.orchestrator = Orchestrator()
         self.action_library = ActionLibrary()
         self.action_knowledge_frame = pl.DataFrame(schema=ACTION_KNOWLEDGE_SCHEMA)
+        self.economy = Economy(MAX_AGENTS)
         initial_clock: SimClock = clock_from_tick(self.tick, self.config)
         self.current_weather = make_weather_state(
             is_raining=False,
@@ -284,6 +290,8 @@ class Simulation:
         return max(needs, key=lambda reason: needs[reason])
 
     def step(self) -> None:
+        """Advance all active agents with vectorized batch operations."""
+
         if self.tick >= self.config.max_ticks():
             return
 
@@ -305,7 +313,7 @@ class Simulation:
         if self.tick > 0 and self.tick % spawn_interval == 0:
             self.spawn_settlers(self.rng.randint(1, 3), self.tick)
 
-        active_mask: NDArray[np.bool_] = self.agents.active
+        active_mask: NDArray[np.bool_] = self.agents.active.copy()
         if bool(np.any(active_mask)):
             self._step_agents(clock, weather, active_mask)
 
@@ -442,31 +450,10 @@ class Simulation:
         weather: WeatherState,
         active_mask: NDArray[np.bool_],
     ) -> None:
-        perception_start: float = perf_counter()
-        self.agent.ensure_visit_buffer(self.world.width * self.world.height)
-        position_index: int = index_of(self.world.width, self.agent.position)
-        self.agent.visited_counts[position_index] += 1
+        """Run the vectorized hot loop over all active agent slots."""
 
+        self._sync_agent_cache_to_arrays()
         is_sheltered: bool = self.agent_is_sheltered()
-
-        # Batch Perception (Hot Path execution pushing arrays directly)
-        p_agent_ids, p_tiles, p_kinds, p_amounts = perceive_all(
-            self.agents,
-            self.world,
-            clock,
-            self.config,
-            self._perception_out_agent_ids,
-            self._perception_out_tile_indices,
-            self._perception_out_kinds,
-            self._perception_out_amounts,
-        )
-
-        founder_mask: NDArray[np.bool_] = p_agent_ids == 0
-        water_mask: NDArray[np.bool_] = (p_kinds == RESOURCE_KIND_WATER) & founder_mask
-        food_mask: NDArray[np.bool_] = (p_kinds == RESOURCE_KIND_FOOD) & founder_mask
-        visible_water_indices: NDArray[np.int64] = p_tiles[water_mask]
-        visible_food_indices: NDArray[np.int64] = p_tiles[food_mask]
-
         observation: Observation = perceive(
             self.world,
             self.agent.position,
@@ -475,63 +462,6 @@ class Simulation:
             weather,
             is_sheltered,
         )
-
-        for resource_kind, indices, amounts in (
-            (
-                ResourceKind.WATER,
-                observation.visible_water_indices,
-                observation.visible_water_amounts,
-            ),
-            (
-                ResourceKind.FOOD,
-                observation.visible_food_indices,
-                observation.visible_food_amounts,
-            ),
-        ):
-            for i in range(indices.shape[0]):
-                tile_index: int = int(indices[i])
-                position: Position = Position(
-                    x=tile_index % self.world.width,
-                    y=tile_index // self.world.width,
-                )
-                amount: float = float(amounts[i])
-                is_new: bool = self.memory.observe_resource(
-                    resource_kind,
-                    position,
-                    amount,
-                    self.tick,
-                )
-                memory_record: ResourceMemory | None = self._memory_at(
-                    resource_kind,
-                    position,
-                )
-                if is_new:
-                    if resource_kind is ResourceKind.WATER:
-                        self.agent.water_discoveries += 1
-                        self.learning.learned_water_sites += 1
-                    else:
-                        self.agent.food_discoveries += 1
-                        self.learning.learned_food_sites += 1
-                    self._log_at(
-                        "learning",
-                        self._learned_message(resource_kind, position),
-                        position,
-                    )
-                elif memory_record is not None:
-                    confidence: str = self._format_confidence(
-                        memory_record.decayed_confidence(self.tick, self.config)
-                    )
-                    self._log_at(
-                        "learning",
-                        self._updated_memory_message(
-                            resource_kind, position, confidence
-                        ),
-                        position,
-                    )
-
-        visible_water_indices = observation.visible_water_indices
-        visible_food_indices = observation.visible_food_indices
-
         new_discoverable_ids: list[str] = update_discoverable_memory(
             self.discoverable_memory,
             observation.discoverables,
@@ -542,19 +472,6 @@ class Simulation:
             if item is not None:
                 item.discovered = True
             self._log("memory", f"discovered {discoverable_id}")
-        self._record_timing("perception", perf_counter() - perception_start)
-
-        teacher_idx, learner_idx = compute_social_interactions(
-            active_mask,
-            self.agents.x,
-            self.agents.y,
-            vision_radius=2,
-        )
-        self.action_knowledge_frame = transfer_action_knowledge(
-            self.action_knowledge_frame,
-            teacher_idx,
-            learner_idx,
-        )
 
         if self.config.enable_goap_control:
             goap_start: float = perf_counter()
@@ -570,7 +487,6 @@ class Simulation:
             else:
                 self._record_timing("goap", perf_counter() - goap_start)
 
-        policy_start: float = perf_counter()
         interaction_ticks = self._try_record_discoverable_exploitation(
             clock, observation
         )
@@ -584,46 +500,176 @@ class Simulation:
             self._log_cold_status_transition()
             self._advance_interaction_ticks(interaction_ticks)
             self._sync_memory_markers()
+            if not self.agent.alive:
+                self._log_agent_death()
+            return
+
+        perception_start: float = perf_counter()
+        p_agent_ids, p_tiles, p_kinds, p_amounts = perceive_all(
+            self.agents,
+            self.world,
+            clock,
+            self.config,
+            self._perception_out_agent_ids,
+            self._perception_out_tile_indices,
+            self._perception_out_kinds,
+            self._perception_out_amounts,
+        )
+        global_memory = self.memory.global_memory
+        if global_memory is None:
+            raise RuntimeError("global memory is not initialized")
+        global_memory.observe_batch(
+            agent_ids=p_agent_ids + np.int64(1),
+            tile_indices=p_tiles,
+            kind_ids=p_kinds,
+            amounts=p_amounts,
+            world_width=self.world.width,
+            tick=self.tick,
+        )
+        if int(np.count_nonzero(active_mask)) == 1:
+            memory_frame = global_memory.memories_for_agent(self.memory.agent_id)
+            water_memory = memory_frame.filter(pl.col("kind") == 1)
+            food_memory = memory_frame.filter(pl.col("kind") == 2)
+            self.agent.water_discoveries = water_memory.height
+            self.agent.food_discoveries = food_memory.height
+            self.learning.learned_water_sites = water_memory.height
+            self.learning.learned_food_sites = food_memory.height
+        self._record_timing("perception", perf_counter() - perception_start)
+
+        social_start: float = perf_counter()
+        teacher_idx, learner_idx = compute_social_interactions(
+            active_mask,
+            self.agents.x,
+            self.agents.y,
+            vision_radius=2,
+        )
+        self.action_knowledge_frame = transfer_action_knowledge(
+            self.action_knowledge_frame,
+            teacher_idx,
+            learner_idx,
+        )
+        self.economy.inventory_surplus[:] = np.where(
+            active_mask,
+            np.maximum(np.float32(0.0), np.float32(1.0) - self.agents.hunger),
+            np.float32(0.0),
+        ).astype(np.float32, copy=False)
+        buyers, sellers, values = compute_trade_opportunities(
+            active_mask,
+            self.agents.x,
+            self.agents.y,
+            self.agents.hunger,
+            self.economy.inventory_surplus,
+            vision_radius=2,
+        )
+        self.economy.batch_transact(buyers, sellers, values)
+        self._record_timing("policy_pathing", perf_counter() - social_start)
+
+        policy_start: float = perf_counter()
+        if int(np.count_nonzero(active_mask)) == 1:
+            before_memory_state: dict[tuple[str, int, int], tuple[int, int]] = (
+                self._memory_use_state()
+            )
+            action_message: str = choose_and_execute_action(
+                self.agent,
+                self.memory,
+                observation.visible_water_indices,
+                observation.visible_food_indices,
+                self.world,
+                clock,
+                self.rng,
+                self.config,
+            )
+            self._record_decision_trace()
+            self._record_memory_use_deltas(before_memory_state)
+            self._sync_memory_markers()
+            if (
+                action_message in {"drank water", "ate food", "slept"}
+                or self.tick % 48 == 0
+            ):
+                self._log("action", action_message)
+            self._update_agent_needs(
+                is_night=clock.is_night,
+                is_raining=weather.is_raining,
+                is_sheltered=self.agent_is_sheltered(),
+                is_cold_exposed=weather.feels_cold,
+            )
+            self._log_cold_status_transition()
             self._record_timing("policy_pathing", perf_counter() - policy_start)
             if not self.agent.alive:
                 self._log_agent_death()
             return
 
-        before_memory_state: dict[tuple[str, int, int], tuple[int, int]] = (
-            self._memory_use_state()
+        width: np.int32 = np.int32(self.world.width)
+        height: np.int32 = np.int32(self.world.height)
+        current_index: NDArray[np.int64] = self.agents.y.astype(np.int64) * int(
+            width
+        ) + self.agents.x.astype(np.int64)
+        water_grid: NDArray[np.float64] = np.asarray(self.world.water, dtype=np.float64)
+        food_grid: NDArray[np.float64] = np.asarray(self.world.food, dtype=np.float64)
+        water_here: NDArray[np.float64] = water_grid[current_index]
+        food_here: NDArray[np.float64] = food_grid[current_index]
+        drink_mask: NDArray[np.bool_] = (
+            active_mask
+            & (water_here > 0.25)
+            & (self.agents.thirst >= self.agents.hunger)
         )
+        eat_mask: NDArray[np.bool_] = active_mask & ~drink_mask & (food_here > 0.18)
+        self.agents.thirst[drink_mask] = np.maximum(
+            np.float32(0.0),
+            self.agents.thirst[drink_mask] - np.float32(0.55),
+        )
+        self.agents.hunger[eat_mask] = np.maximum(
+            np.float32(0.0),
+            self.agents.hunger[eat_mask] - np.float32(0.45),
+        )
+        np.subtract.at(water_grid, current_index[drink_mask], 0.18)
+        np.subtract.at(food_grid, current_index[eat_mask], 0.16)
+        water_grid[current_index[drink_mask]] = np.maximum(
+            water_grid[current_index[drink_mask]],
+            0.0,
+        )
+        food_grid[current_index[eat_mask]] = np.maximum(
+            food_grid[current_index[eat_mask]],
+            0.0,
+        )
+        self.world.water = water_grid
+        self.world.food = food_grid
 
-        # Policy is entirely separated from the legacy Observation object
-        action_message: str = choose_and_execute_action(
-            self.agent,
-            self.memory,
-            visible_water_indices,
-            visible_food_indices,
-            self.world,
-            clock,
-            self.rng,
+        move_mask: NDArray[np.bool_] = active_mask & ~drink_mask & ~eat_mask
+        x_direction: NDArray[np.int32] = np.where(
+            (self.tick + np.arange(self.agents.count, dtype=np.int32)) % 2 == 0,
+            np.int32(1),
+            np.int32(-1),
+        )
+        y_direction: NDArray[np.int32] = np.where(
+            (self.tick + np.arange(self.agents.count, dtype=np.int32)) % 3 == 0,
+            np.int32(1),
+            np.int32(0),
+        )
+        self.agents.x[move_mask] = np.clip(
+            self.agents.x[move_mask] + x_direction[move_mask],
+            np.int32(0),
+            width - np.int32(1),
+        ).astype(np.int32, copy=False)
+        self.agents.y[move_mask] = np.clip(
+            self.agents.y[move_mask] + y_direction[move_mask],
+            np.int32(0),
+            height - np.int32(1),
+        ).astype(np.int32, copy=False)
+
+        update_needs_arrays(
+            self.agents,
             self.config,
-        )
-
-        self._record_decision_trace()
-        self._record_memory_use_deltas(before_memory_state)
-        self._sync_memory_markers()
-        if (
-            action_message in {"drank water", "ate food", "slept"}
-            or self.tick % 48 == 0
-        ):
-            self._log("action", action_message)
-
-        self._update_agent_needs(
             is_night=clock.is_night,
             is_raining=weather.is_raining,
-            is_sheltered=self.agent_is_sheltered(),
+            is_sheltered=False,
             is_cold_exposed=weather.feels_cold,
         )
+        self._sync_agent_cache_from_arrays()
         self._log_cold_status_transition()
-        self._record_timing("policy_pathing", perf_counter() - policy_start)
-        if not self.agent.alive:
+        if not bool(self.agents.active[0]):
             self._log_agent_death()
+        self._record_timing("policy_pathing", perf_counter() - policy_start)
 
     def _try_record_discoverable_exploitation(
         self,

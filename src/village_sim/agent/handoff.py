@@ -79,7 +79,7 @@ def group_departing_agents_by_neighbor(
     memory: GlobalMemory,
     bounds: RegionBounds,
     agent_ids: NDArray[np.int64],
-) -> dict[tuple[int, int], NDArray[np.uint8]]:
+) -> dict[tuple[int, int], bytes]:
     """Detach out-of-bounds agents and return MessagePack buffers by neighbor delta."""
 
     if agent_ids.shape != arrays.active.shape:
@@ -106,7 +106,7 @@ def group_departing_agents_by_neighbor(
 
     departing_ids: NDArray[np.int64] = agent_ids[departing_indices]
     memory_frame: pl.DataFrame = detach_memory_rows(memory, departing_ids)
-    buffers: dict[tuple[int, int], NDArray[np.uint8]] = {}
+    buffers: dict[tuple[int, int], bytes] = {}
     for delta in unique_deltas:
         delta_mask: NDArray[np.bool_] = np.all(deltas == delta, axis=1)
         selected_indices: NDArray[np.int64] = departing_indices[delta_mask]
@@ -155,8 +155,8 @@ def pack_agent_handoff(
     agent_ids: NDArray[np.int64],
     bounds: RegionBounds,
     memory_frame: pl.DataFrame,
-) -> NDArray[np.uint8]:
-    """Pack agent rows and memory rows into a flat uint8 MessagePack buffer."""
+) -> bytes:
+    """Pack agent rows and memory rows into one MessagePack byte string."""
 
     if indices.size != agent_ids.size:
         raise ValueError("handoff indices and agent_ids must have equal length")
@@ -179,13 +179,13 @@ def pack_agent_handoff(
         "memory": _pack_memory_frame(memory_frame),
     }
     packed: bytes = msgpack.packb(payload, use_bin_type=True)
-    return np.frombuffer(packed, dtype=np.uint8).copy()
+    return packed
 
 
-def unpack_agent_handoff(buffer: NDArray[np.uint8]) -> HandoffBatch:
-    """Decode a flat uint8 MessagePack handoff buffer."""
+def unpack_agent_handoff(buffer: bytes) -> HandoffBatch:
+    """Decode a MessagePack handoff byte string."""
 
-    payload = msgpack.unpackb(buffer.tobytes(), raw=False)
+    payload = msgpack.unpackb(buffer, raw=False)
     if not isinstance(payload, dict):
         raise TypeError("handoff payload must be a map")
     agent_ids = _unpack_array(_expect_map(payload, "agent_ids"), np.int64)
@@ -220,7 +220,7 @@ def receive_agent_handoff(
     memory: GlobalMemory,
     bounds: RegionBounds,
     agent_ids: NDArray[np.int64],
-    buffer: NDArray[np.uint8],
+    buffer: bytes,
 ) -> int:
     """Insert a decoded handoff into free local slots and merge its memory rows."""
 
