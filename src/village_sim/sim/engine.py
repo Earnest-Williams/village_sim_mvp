@@ -13,6 +13,13 @@ from numpy.typing import NDArray
 from village_sim.agent.actions import BUILD, CHOP, DIG, PLANT, normalize_action_payload
 from village_sim.agent.decision import DecisionSource
 from village_sim.agent.memory import (
+    MEMORY_AGENT_ID,
+    MEMORY_CONFIDENCE,
+    MEMORY_KIND,
+    MEMORY_LAST_AMOUNT,
+    MEMORY_LAST_SEEN,
+    MEMORY_X,
+    MEMORY_Y,
     AgentMemory,
     DiscoverableAgentMemory,
     GlobalMemory,
@@ -33,6 +40,8 @@ from village_sim.agent.perception import (
 )
 from village_sim.agent.policy import choose_and_execute_action
 from village_sim.agent.state import (
+    ACTION_TO_ID,
+    GOAL_TO_ID,
     AgentArrays,
     AgentState,
     MAX_AGENTS,
@@ -47,6 +56,7 @@ from village_sim.core.time import SimClock, clock_from_tick
 from village_sim.core.types import (
     ActionKind,
     DeathReason,
+    GoalKind,
     Position,
     PrimitiveAction,
     ResourceKind,
@@ -341,21 +351,18 @@ class Simulation:
             self.tick += 1
             return
 
-        needs_start: float = perf_counter()
-        update_needs_arrays(
-            self.agents,
-            self.config,
-            is_night=clock.is_night,
-            is_raining=self.current_weather.is_raining,
-            is_sheltered=False,
-            is_cold_exposed=self.current_weather.feels_cold,
-        )
-        active_mask = self.agents.active.copy()
-        self._record_timing("policy_pathing", perf_counter() - needs_start)
+        self._step_multi_agent_survival(clock, self.current_weather)
+        self._log_newly_dead_agents(initial_active_mask)
+
+        self.tick += 1
+
+    def _step_multi_agent_survival(
+        self, clock: SimClock, weather: WeatherState
+    ) -> None:
+        """Run tier-1 survival for active multi-agent batches."""
+
+        active_mask: NDArray[np.bool_] = self.agents.active.copy()
         if not bool(np.any(active_mask)):
-            self._sync_agent_cache_from_arrays()
-            self._log_newly_dead_agents(initial_active_mask)
-            self.tick += 1
             return
 
         perception_start: float = perf_counter()
@@ -377,50 +384,488 @@ class Simulation:
             world_width=self.world.width,
             tick=self.tick,
         )
-        if int(np.count_nonzero(active_mask)) == 1 and bool(active_mask[0]):
-            memory_frame: pl.DataFrame = self.global_memory.memories_for_agent(
-                self.memory.agent_id
-            )
-            water_memory: pl.DataFrame = memory_frame.filter(pl.col("kind") == 1)
-            food_memory: pl.DataFrame = memory_frame.filter(pl.col("kind") == 2)
-            self.agent.water_discoveries = water_memory.height
-            self.agent.food_discoveries = food_memory.height
-            self.learning.learned_water_sites = water_memory.height
-            self.learning.learned_food_sites = food_memory.height
         self._record_timing("perception", perf_counter() - perception_start)
 
-        trade_start: float = perf_counter()
-        self.economy.inventory_surplus[:] = np.where(
-            active_mask,
-            np.maximum(np.float32(0.0), np.float32(1.0) - self.agents.hunger),
-            np.float32(0.0),
-        ).astype(np.float32, copy=False)
-        buyers, sellers, values = compute_trade_opportunities(
-            active_mask,
-            self.agents.x,
-            self.agents.y,
-            self.agents.hunger,
-            self.economy.inventory_surplus,
-            vision_radius=2,
+        policy_start: float = perf_counter()
+        visible_water_targets: NDArray[np.int64] = self._nearest_visible_targets(
+            p_agent_rows, p_tiles, p_kinds, RESOURCE_KIND_WATER
         )
-        self.economy.batch_transact(buyers, sellers, values)
-        self._record_timing("policy_pathing", perf_counter() - trade_start)
+        visible_food_targets: NDArray[np.int64] = self._nearest_visible_targets(
+            p_agent_rows, p_tiles, p_kinds, RESOURCE_KIND_FOOD
+        )
+        remembered_water_targets: NDArray[np.int64] = self._best_remembered_targets(
+            ResourceKind.WATER, active_mask
+        )
+        remembered_food_targets: NDArray[np.int64] = self._best_remembered_targets(
+            ResourceKind.FOOD, active_mask
+        )
 
-        memory_start: float = perf_counter()
-        self.global_memory.decay_confidence(self.tick, self.config)
-        self._record_timing("perception", perf_counter() - memory_start)
+        idle_id: np.int16 = np.int16(ACTION_TO_ID[ActionKind.IDLE])
+        drink_id: np.int16 = np.int16(ACTION_TO_ID[ActionKind.DRINK])
+        eat_id: np.int16 = np.int16(ACTION_TO_ID[ActionKind.EAT])
+        sleep_id: np.int16 = np.int16(ACTION_TO_ID[ActionKind.SLEEP])
+        move_id: np.int16 = np.int16(ACTION_TO_ID[ActionKind.MOVE])
+        explore_id: np.int16 = np.int16(ACTION_TO_ID[ActionKind.EXPLORE])
+        get_water_id: np.int16 = np.int16(GOAL_TO_ID[GoalKind.GET_WATER])
+        get_food_id: np.int16 = np.int16(GOAL_TO_ID[GoalKind.GET_FOOD])
+        sleep_goal_id: np.int16 = np.int16(GOAL_TO_ID[GoalKind.SLEEP])
+        explore_goal_id: np.int16 = np.int16(GOAL_TO_ID[GoalKind.EXPLORE])
 
-        death_mask: NDArray[np.bool_] = active_mask & (
-            (self.agents.thirst >= np.float32(1.0))
-            | (self.agents.hunger >= np.float32(1.0))
-            | (self.agents.health <= np.float32(0.0))
+        desired_x: NDArray[np.int32] = self.agents.x.copy()
+        desired_y: NDArray[np.int32] = self.agents.y.copy()
+        desired_action: NDArray[np.int16] = np.full(
+            self.agents.count, idle_id, dtype=np.int16
+        )
+        target_tiles: NDArray[np.int64] = np.full(self.agents.count, -1, dtype=np.int64)
+
+        thirst_mask: NDArray[np.bool_] = active_mask & (
+            self.agents.thirst >= np.float32(0.64)
+        )
+        hunger_mask: NDArray[np.bool_] = (
+            active_mask & ~thirst_mask & (self.agents.hunger >= np.float32(0.66))
+        )
+        sleep_mask: NDArray[np.bool_] = (
+            active_mask
+            & ~thirst_mask
+            & ~hunger_mask
+            & (
+                ((clock.is_night) & (self.agents.thirst < np.float32(0.82)))
+                & (self.agents.hunger < np.float32(0.82))
+                | (self.agents.fatigue >= np.float32(0.82))
+            )
+        )
+        explore_mask: NDArray[np.bool_] = (
+            active_mask & ~thirst_mask & ~hunger_mask & ~sleep_mask
+        )
+
+        water_adjacent: NDArray[np.int64] = self._adjacent_resource_tiles(
+            np.asarray(self.world.water, dtype=np.float64), np.float64(0.20)
+        )
+        food_adjacent: NDArray[np.int64] = self._adjacent_resource_tiles(
+            np.asarray(self.world.food, dtype=np.float64), np.float64(0.12)
+        )
+        drink_mask: NDArray[np.bool_] = thirst_mask & (water_adjacent >= 0)
+        eat_mask: NDArray[np.bool_] = hunger_mask & (food_adjacent >= 0)
+
+        desired_action[drink_mask] = drink_id
+        desired_action[eat_mask] = eat_id
+        desired_action[sleep_mask] = sleep_id
+        desired_action[explore_mask] = explore_id
+        self.agents.current_goal[thirst_mask] = get_water_id
+        self.agents.current_goal[hunger_mask] = get_food_id
+        self.agents.current_goal[sleep_mask] = sleep_goal_id
+        self.agents.current_goal[explore_mask] = explore_goal_id
+
+        water_seek_mask: NDArray[np.bool_] = thirst_mask & ~drink_mask
+        food_seek_mask: NDArray[np.bool_] = hunger_mask & ~eat_mask
+        target_tiles[water_seek_mask] = np.where(
+            visible_water_targets[water_seek_mask] >= 0,
+            visible_water_targets[water_seek_mask],
+            remembered_water_targets[water_seek_mask],
+        )
+        target_tiles[food_seek_mask] = np.where(
+            visible_food_targets[food_seek_mask] >= 0,
+            visible_food_targets[food_seek_mask],
+            remembered_food_targets[food_seek_mask],
+        )
+        targeted_move_mask: NDArray[np.bool_] = active_mask & (target_tiles >= 0)
+        desired_action[targeted_move_mask] = move_id
+        self._write_target_steps(targeted_move_mask, target_tiles, desired_x, desired_y)
+
+        fallback_explore_mask: NDArray[np.bool_] = (
+            active_mask
+            & (desired_action == idle_id)
+            & ~drink_mask
+            & ~eat_mask
+            & ~sleep_mask
+        )
+        desired_action[fallback_explore_mask] = explore_id
+        self._write_exploration_steps(fallback_explore_mask, desired_x, desired_y)
+        self.agents.current_action[active_mask] = desired_action[active_mask]
+
+        self._resolve_movement_intents(active_mask, desired_x, desired_y)
+        self._consume_multi_agent_resources(drink_id, eat_id)
+
+        update_needs_arrays(
+            self.agents,
+            self.config,
+            is_night=clock.is_night,
+            is_raining=weather.is_raining,
+            is_sheltered=False,
+            is_cold_exposed=weather.feels_cold,
+        )
+        death_mask: NDArray[np.bool_] = self.agents.active & (
+            self.agents.health <= np.float32(0.0)
         )
         self.agents.active[death_mask] = False
         self._sync_agent_cache_from_arrays()
         self._log_cold_status_transition()
-        self._log_newly_dead_agents(initial_active_mask)
+        self.global_memory.decay_confidence(self.tick, self.config)
+        self._record_timing("policy_pathing", perf_counter() - policy_start)
 
-        self.tick += 1
+    def _nearest_visible_targets(
+        self,
+        agent_rows: NDArray[np.int64],
+        tile_indices: NDArray[np.int64],
+        kind_ids: NDArray[np.int32],
+        resource_kind_id: int,
+    ) -> NDArray[np.int64]:
+        targets: NDArray[np.int64] = np.full(self.agents.count, -1, dtype=np.int64)
+        kind_mask: NDArray[np.bool_] = kind_ids == np.int32(resource_kind_id)
+        if not bool(np.any(kind_mask)):
+            return targets
+
+        rows: NDArray[np.int64] = agent_rows[kind_mask]
+        tiles: NDArray[np.int64] = tile_indices[kind_mask]
+        tile_x: NDArray[np.int64] = tiles % self.world.width
+        tile_y: NDArray[np.int64] = tiles // self.world.width
+        distances: NDArray[np.int64] = np.abs(
+            tile_x - self.agents.x[rows].astype(np.int64)
+        ) + np.abs(tile_y - self.agents.y[rows].astype(np.int64))
+        order: NDArray[np.int64] = np.lexsort((tiles, distances, rows))
+        sorted_rows: NDArray[np.int64] = rows[order]
+        first_rows, first_indices = np.unique(sorted_rows, return_index=True)
+        targets[first_rows] = tiles[order][first_indices]
+        return targets
+
+    def _best_remembered_targets(
+        self, kind: ResourceKind, active_mask: NDArray[np.bool_]
+    ) -> NDArray[np.int64]:
+        targets: NDArray[np.int64] = np.full(self.agents.count, -1, dtype=np.int64)
+        self.global_memory.flush_pending()
+        if self.global_memory.frame.is_empty():
+            return targets
+
+        active_rows: NDArray[np.int64] = np.flatnonzero(active_mask).astype(np.int64)
+        if active_rows.size == 0:
+            return targets
+        active_agents = pl.DataFrame(
+            {
+                MEMORY_AGENT_ID: self.agent_ids[active_rows].astype(np.int32),
+                "agent_row": active_rows,
+                "agent_x": self.agents.x[active_rows],
+                "agent_y": self.agents.y[active_rows],
+            }
+        )
+        kind_id: int = 1 if kind is ResourceKind.WATER else 2
+        decay_per_day: float = (
+            self.config.water_memory_decay_per_day
+            if kind is ResourceKind.WATER
+            else self.config.food_memory_decay_per_day
+        )
+        age_days = (pl.lit(self.tick, dtype=pl.Int64) - pl.col(MEMORY_LAST_SEEN)).clip(
+            0, None
+        ).cast(pl.Float32) / float(self.config.ticks_per_day)
+        decayed = (pl.col(MEMORY_CONFIDENCE) - (age_days * decay_per_day)).clip(
+            0.0, 1.0
+        )
+        scored = (
+            self.global_memory.frame.filter(pl.col(MEMORY_KIND) == kind_id)
+            .join(active_agents, on=MEMORY_AGENT_ID, how="inner")
+            .with_columns(
+                decayed.alias("_decayed_confidence"),
+                (
+                    decayed
+                    + (pl.col(MEMORY_LAST_AMOUNT).clip(0.0, None) * 0.12).clip(
+                        0.0, 0.25
+                    )
+                    - (
+                        (
+                            (pl.col(MEMORY_X) - pl.col("agent_x")).abs()
+                            + (pl.col(MEMORY_Y) - pl.col("agent_y")).abs()
+                        ).cast(pl.Float32)
+                        * 0.025
+                    )
+                ).alias("_score"),
+                (pl.col(MEMORY_Y) * self.world.width + pl.col(MEMORY_X)).alias(
+                    "target_tile"
+                ),
+            )
+            .filter(pl.col("_decayed_confidence") > 0.08)
+            .sort(
+                ["agent_row", "_score", MEMORY_X, MEMORY_Y],
+                descending=[False, True, False, False],
+            )
+            .unique(subset=["agent_row"], keep="first", maintain_order=True)
+        )
+        if scored.is_empty():
+            return targets
+        rows: NDArray[np.int64] = (
+            scored.get_column("agent_row").to_numpy().astype(np.int64, copy=False)
+        )
+        tiles: NDArray[np.int64] = (
+            scored.get_column("target_tile").to_numpy().astype(np.int64, copy=False)
+        )
+        targets[rows] = tiles
+        return targets
+
+    def _adjacent_resource_tiles(
+        self, resource_grid: NDArray[np.float64], threshold: np.float64
+    ) -> NDArray[np.int64]:
+        width: int = self.world.width
+        height: int = self.world.height
+        count: int = self.agents.count
+        current: NDArray[np.int64] = self.agents.y.astype(
+            np.int64
+        ) * width + self.agents.x.astype(np.int64)
+        candidates: NDArray[np.int64] = np.full((count, 5), -1, dtype=np.int64)
+        candidates[:, 0] = current
+        has_left: NDArray[np.bool_] = self.agents.x > np.int32(0)
+        has_right: NDArray[np.bool_] = self.agents.x < np.int32(width - 1)
+        has_up: NDArray[np.bool_] = self.agents.y > np.int32(0)
+        has_down: NDArray[np.bool_] = self.agents.y < np.int32(height - 1)
+        candidates[has_left, 1] = current[has_left] - 1
+        candidates[has_right, 2] = current[has_right] + 1
+        candidates[has_up, 3] = current[has_up] - width
+        candidates[has_down, 4] = current[has_down] + width
+        valid: NDArray[np.bool_] = candidates >= 0
+        values: NDArray[np.float64] = np.zeros((count, 5), dtype=np.float64)
+        values[valid] = resource_grid[candidates[valid]]
+        values[~valid] = -1.0
+        values[values < threshold] = -1.0
+        best_offsets: NDArray[np.int64] = np.argmax(values, axis=1).astype(np.int64)
+        rows: NDArray[np.int64] = np.arange(count, dtype=np.int64)
+        best_tiles: NDArray[np.int64] = candidates[rows, best_offsets]
+        best_values: NDArray[np.float64] = values[rows, best_offsets]
+        return np.where(best_values >= threshold, best_tiles, np.int64(-1))
+
+    def _write_target_steps(
+        self,
+        move_mask: NDArray[np.bool_],
+        target_tiles: NDArray[np.int64],
+        desired_x: NDArray[np.int32],
+        desired_y: NDArray[np.int32],
+    ) -> None:
+        if not bool(np.any(move_mask)):
+            return
+        target_x: NDArray[np.int32] = (target_tiles % self.world.width).astype(
+            np.int32, copy=False
+        )
+        target_y: NDArray[np.int32] = (target_tiles // self.world.width).astype(
+            np.int32, copy=False
+        )
+        best_x: NDArray[np.int32] = self.agents.x.copy()
+        best_y: NDArray[np.int32] = self.agents.y.copy()
+        best_score: NDArray[np.int32] = np.full(
+            self.agents.count, np.iinfo(np.int32).max, dtype=np.int32
+        )
+        x_offsets: tuple[np.int32, np.int32, np.int32, np.int32] = (
+            np.int32(1),
+            np.int32(-1),
+            np.int32(0),
+            np.int32(0),
+        )
+        y_offsets: tuple[np.int32, np.int32, np.int32, np.int32] = (
+            np.int32(0),
+            np.int32(0),
+            np.int32(1),
+            np.int32(-1),
+        )
+        for x_offset, y_offset in zip(x_offsets, y_offsets, strict=True):
+            candidate_x: NDArray[np.int32] = self.agents.x + x_offset
+            candidate_y: NDArray[np.int32] = self.agents.y + y_offset
+            candidate_ok: NDArray[np.bool_] = self._candidate_tiles_passable(
+                candidate_x, candidate_y
+            )
+            score: NDArray[np.int32] = np.abs(candidate_x - target_x) + np.abs(
+                candidate_y - target_y
+            )
+            improve_mask: NDArray[np.bool_] = (
+                move_mask & candidate_ok & (score < best_score)
+            )
+            best_x[improve_mask] = candidate_x[improve_mask]
+            best_y[improve_mask] = candidate_y[improve_mask]
+            best_score[improve_mask] = score[improve_mask]
+        current_score: NDArray[np.int32] = np.abs(self.agents.x - target_x) + np.abs(
+            self.agents.y - target_y
+        )
+        progress_mask: NDArray[np.bool_] = move_mask & (best_score < current_score)
+        desired_x[progress_mask] = best_x[progress_mask]
+        desired_y[progress_mask] = best_y[progress_mask]
+        stuck_mask: NDArray[np.bool_] = move_mask & ~progress_mask
+        self._write_exploration_steps(stuck_mask, desired_x, desired_y)
+
+    def _candidate_tiles_passable(
+        self, candidate_x: NDArray[np.int32], candidate_y: NDArray[np.int32]
+    ) -> NDArray[np.bool_]:
+        in_bounds: NDArray[np.bool_] = (
+            (candidate_x >= np.int32(0))
+            & (candidate_x < np.int32(self.world.width))
+            & (candidate_y >= np.int32(0))
+            & (candidate_y < np.int32(self.world.height))
+        )
+        clipped_x: NDArray[np.int32] = np.clip(
+            candidate_x, np.int32(0), np.int32(self.world.width - 1)
+        ).astype(np.int32, copy=False)
+        clipped_y: NDArray[np.int32] = np.clip(
+            candidate_y, np.int32(0), np.int32(self.world.height - 1)
+        ).astype(np.int32, copy=False)
+        tiles: NDArray[np.int64] = clipped_y.astype(
+            np.int64
+        ) * self.world.width + clipped_x.astype(np.int64)
+        terrain: NDArray[np.int64] = np.asarray(self.world.terrain, dtype=np.int64)
+        passable: NDArray[np.bool_] = in_bounds & (
+            terrain[tiles] != int(TerrainKind.ROCK)
+        )
+        return passable
+
+    def _write_exploration_steps(
+        self,
+        explore_mask: NDArray[np.bool_],
+        desired_x: NDArray[np.int32],
+        desired_y: NDArray[np.int32],
+    ) -> None:
+        if not bool(np.any(explore_mask)):
+            return
+        rows: NDArray[np.int32] = np.arange(self.agents.count, dtype=np.int32)
+        selected: NDArray[np.bool_] = np.zeros(self.agents.count, dtype=np.bool_)
+        for offset in range(4):
+            direction: NDArray[np.int32] = (
+                rows + np.int32(self.tick + offset)
+            ) % np.int32(4)
+            candidate_x: NDArray[np.int32] = self.agents.x.copy()
+            candidate_y: NDArray[np.int32] = self.agents.y.copy()
+            candidate_x[direction == np.int32(0)] += np.int32(1)
+            candidate_x[direction == np.int32(1)] -= np.int32(1)
+            candidate_y[direction == np.int32(2)] += np.int32(1)
+            candidate_y[direction == np.int32(3)] -= np.int32(1)
+            candidate_ok: NDArray[np.bool_] = self._candidate_tiles_passable(
+                candidate_x, candidate_y
+            )
+            write_mask: NDArray[np.bool_] = explore_mask & ~selected & candidate_ok
+            desired_x[write_mask] = candidate_x[write_mask]
+            desired_y[write_mask] = candidate_y[write_mask]
+            selected[write_mask] = True
+
+    def _resolve_movement_intents(
+        self,
+        active_mask: NDArray[np.bool_],
+        desired_x: NDArray[np.int32],
+        desired_y: NDArray[np.int32],
+    ) -> None:
+        width: int = self.world.width
+        world_size: int = width * self.world.height
+        current_tiles: NDArray[np.int64] = self.agents.y.astype(
+            np.int64
+        ) * width + self.agents.x.astype(np.int64)
+        desired_tiles: NDArray[np.int64] = desired_y.astype(
+            np.int64
+        ) * width + desired_x.astype(np.int64)
+        moving_mask: NDArray[np.bool_] = active_mask & (desired_tiles != current_tiles)
+        if not bool(np.any(moving_mask)):
+            return
+
+        terrain: NDArray[np.int64] = np.asarray(self.world.terrain, dtype=np.int64)
+        passable_mask: NDArray[np.bool_] = terrain[desired_tiles] != int(
+            TerrainKind.ROCK
+        )
+        occupancy: NDArray[np.int64] = np.full(world_size, -1, dtype=np.int64)
+        active_rows: NDArray[np.int64] = np.flatnonzero(active_mask).astype(np.int64)
+        occupancy[current_tiles[active_rows]] = active_rows
+        desired_occupants: NDArray[np.int64] = occupancy[desired_tiles]
+        unoccupied_or_self: NDArray[np.bool_] = (desired_occupants < 0) | (
+            desired_occupants == np.arange(self.agents.count, dtype=np.int64)
+        )
+        eligible_mask: NDArray[np.bool_] = (
+            moving_mask & passable_mask & unoccupied_or_self
+        )
+        eligible_rows: NDArray[np.int64] = np.flatnonzero(eligible_mask).astype(
+            np.int64
+        )
+        if eligible_rows.size == 0:
+            return
+
+        eligible_tiles: NDArray[np.int64] = desired_tiles[eligible_rows]
+        order: NDArray[np.int64] = np.lexsort((eligible_rows, eligible_tiles))
+        sorted_tiles: NDArray[np.int64] = eligible_tiles[order]
+        first_indices: NDArray[np.int64] = np.unique(sorted_tiles, return_index=True)[1]
+        winners: NDArray[np.int64] = eligible_rows[order][first_indices]
+        self.agents.x[winners] = desired_x[winners]
+        self.agents.y[winners] = desired_y[winners]
+
+    def _consume_multi_agent_resources(
+        self, drink_id: np.int16, eat_id: np.int16
+    ) -> None:
+        water_grid: NDArray[np.float64] = np.asarray(self.world.water, dtype=np.float64)
+        food_grid: NDArray[np.float64] = np.asarray(self.world.food, dtype=np.float64)
+        drink_tiles: NDArray[np.int64] = self._adjacent_resource_tiles(
+            water_grid, np.float64(0.20)
+        )
+        eat_tiles: NDArray[np.int64] = self._adjacent_resource_tiles(
+            food_grid, np.float64(0.12)
+        )
+        drink_mask: NDArray[np.bool_] = (
+            self.agents.active
+            & (self.agents.current_action == drink_id)
+            & (drink_tiles >= 0)
+        )
+        eat_mask: NDArray[np.bool_] = (
+            self.agents.active
+            & (self.agents.current_action == eat_id)
+            & (eat_tiles >= 0)
+        )
+        self._consume_resource_grid(
+            resource_grid=water_grid,
+            resource_tiles=drink_tiles,
+            consumer_mask=drink_mask,
+            request_amount=np.float64(self.config.drink_amount_per_tick),
+            need_values=self.agents.thirst,
+            need_scale=np.float32(1.25),
+            permanent_water=True,
+        )
+        self._consume_resource_grid(
+            resource_grid=food_grid,
+            resource_tiles=eat_tiles,
+            consumer_mask=eat_mask,
+            request_amount=np.float64(self.config.eat_amount_per_tick),
+            need_values=self.agents.hunger,
+            need_scale=np.float32(0.95),
+            permanent_water=False,
+        )
+        self.world.water = water_grid
+        self.world.food = food_grid
+
+    def _consume_resource_grid(
+        self,
+        *,
+        resource_grid: NDArray[np.float64],
+        resource_tiles: NDArray[np.int64],
+        consumer_mask: NDArray[np.bool_],
+        request_amount: np.float64,
+        need_values: NDArray[np.float32],
+        need_scale: np.float32,
+        permanent_water: bool,
+    ) -> None:
+        if not bool(np.any(consumer_mask)):
+            return
+        tiles: NDArray[np.int64] = resource_tiles[consumer_mask]
+        world_size: int = self.world.width * self.world.height
+        counts: NDArray[np.int64] = np.bincount(tiles, minlength=world_size).astype(
+            np.int64, copy=False
+        )
+        available_share: NDArray[np.float64] = resource_grid[tiles] / counts[tiles]
+        consumed: NDArray[np.float64] = np.minimum(request_amount, available_share)
+        if permanent_water:
+            terrain: NDArray[np.int64] = np.asarray(self.world.terrain, dtype=np.int64)
+            permanent_mask: NDArray[np.bool_] = terrain[tiles] == int(TerrainKind.WATER)
+            consumed[permanent_mask] = request_amount
+        consumer_rows: NDArray[np.int64] = np.flatnonzero(consumer_mask).astype(
+            np.int64
+        )
+        need_values[consumer_rows] = np.maximum(
+            np.float32(0.0),
+            need_values[consumer_rows] - consumed.astype(np.float32) * need_scale,
+        )
+        drain: NDArray[np.float64] = np.zeros(world_size, dtype=np.float64)
+        if permanent_water:
+            terrain = np.asarray(self.world.terrain, dtype=np.int64)
+            finite_consumed: NDArray[np.float64] = np.where(
+                terrain[tiles] == int(TerrainKind.WATER), 0.0, consumed
+            )
+            np.add.at(drain, tiles, finite_consumed)
+        else:
+            np.add.at(drain, tiles, consumed)
+        resource_grid[:] = np.maximum(0.0, resource_grid - drain)
 
     def run(self, snapshot_every: int = 0) -> SimResult:
         while self.tick < self.config.max_ticks() and bool(self.agents.active[0]):
