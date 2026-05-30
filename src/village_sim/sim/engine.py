@@ -338,6 +338,7 @@ class Simulation:
             if goal is not None:
                 results = self.execute_goap_plan(goal)
                 if results and all(result.success for result in results):
+                    self._sync_memory_markers()
                     if not self.agent.alive:
                         self._log_agent_death()
                     return
@@ -346,7 +347,6 @@ class Simulation:
             clock, observation
         )
         if interaction_ticks > 0:
-            self._sync_memory_markers()
             update_needs(
                 self.agent,
                 self.config,
@@ -357,6 +357,7 @@ class Simulation:
             )
             self._log_cold_status_transition()
             self._advance_interaction_ticks(interaction_ticks)
+            self._sync_memory_markers()
             if not self.agent.alive:
                 self._log_agent_death()
             return
