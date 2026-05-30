@@ -212,7 +212,7 @@ class GlobalMemory:
             }
             for (agent_id, kind_id, x, y), (memory, order) in self._pending_dict.items()
         ]
-        pending_df = pl.DataFrame(rows, schema=MEMORY_SCHEMA, orient="row")
+        pending_df = pl.DataFrame(rows, schema=MEMORY_SCHEMA)
         combined = pl.concat([self.frame, pending_df], how="vertical")
         unique = combined.unique(
             subset=[MEMORY_AGENT_ID, MEMORY_KIND, MEMORY_X, MEMORY_Y],
