@@ -6,10 +6,8 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
-
-import wx  # type: ignore[import-not-found]
-import wx.stc as wxstc  # type: ignore[import-not-found]
+import wx
+import wx.stc as wxstc
 
 from village_sim.core.config import SimConfig
 from village_sim.orchestrator.action_model import ActionLibrary
@@ -80,7 +78,7 @@ class GuiRunOptions:
     tick_delay_seconds: float
 
 
-class VillageSimFrame(wx.Frame):  # type: ignore[misc]
+class VillageSimFrame(wx.Frame):
     def __init__(self) -> None:
         super().__init__(parent=None, title="Village Sim MVP", size=(980, 840))
         panel = wx.Panel(self)
@@ -230,17 +228,17 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
         self.map_ctrl.SetCaretLineVisible(False)
         self.map_ctrl.SetZoom(0)
         self.map_ctrl.SetBackgroundColour(map_bg)
-        margins_background_method: Any = getattr(
+        margins_background_method: object = getattr(
             self.map_ctrl, "SetMarginsBackground", None
         )
         if callable(margins_background_method):
             margins_background_method(map_bg)
-        fold_margin_colour_method: Any = getattr(
+        fold_margin_colour_method: object = getattr(
             self.map_ctrl, "SetFoldMarginColour", None
         )
         if callable(fold_margin_colour_method):
             fold_margin_colour_method(True, map_bg)
-        fold_margin_highlight_method: Any = getattr(
+        fold_margin_highlight_method: object = getattr(
             self.map_ctrl, "SetFoldMarginHiColour", None
         )
         if callable(fold_margin_highlight_method):
@@ -271,8 +269,8 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
             self.map_ctrl.StyleSetBackground(style_num, map_bg)
 
     def _hide_map_margins(self) -> None:
-        margin_count_method: Any = getattr(self.map_ctrl, "GetMargins", None)
-        raw_margin_count: Any = None
+        margin_count_method: object = getattr(self.map_ctrl, "GetMargins", None)
+        raw_margin_count: object = None
         if callable(margin_count_method):
             raw_margin_count = margin_count_method()
         margin_count = 5
@@ -291,7 +289,7 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
         raw_char_width, _raw_char_height = self.map_ctrl.GetTextExtent("M")
         if not isinstance(raw_char_width, int) or raw_char_width <= 0:
             return 0
-        raw_client_width: Any = self.map_ctrl.GetClientSize().width
+        raw_client_width: object = self.map_ctrl.GetClientSize().width
         if not isinstance(raw_client_width, int) or raw_client_width <= 0:
             return 0
         return max(0, raw_client_width // raw_char_width)
@@ -307,7 +305,7 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
         raw_char_width, _raw_char_height = self.map_ctrl.GetTextExtent("M")
         if not isinstance(raw_char_width, int) or raw_char_width <= 0:
             return
-        raw_client_width: Any = self.map_ctrl.GetClientSize().width
+        raw_client_width: object = self.map_ctrl.GetClientSize().width
         client_width = 0
         if isinstance(raw_client_width, int) and raw_client_width > 0:
             client_width = raw_client_width
