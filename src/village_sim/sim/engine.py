@@ -6,6 +6,9 @@ import random
 from dataclasses import dataclass, field
 from time import perf_counter
 
+import numpy as np
+from numpy.typing import NDArray
+
 from village_sim.agent.decision import DecisionSource
 from village_sim.agent.memory import (
     AgentMemory,
@@ -13,7 +16,13 @@ from village_sim.agent.memory import (
     ResourceMemory,
 )
 from village_sim.agent.needs import update_needs_arrays
-from village_sim.agent.perception import Observation, perceive
+from village_sim.agent.perception import (
+    Observation,
+    perceive,
+    perceive_batch_resources,
+    RESOURCE_KIND_WATER,
+    RESOURCE_KIND_FOOD,
+)
 from village_sim.agent.policy import choose_and_execute_action
 from village_sim.agent.state import (
     AgentArrays,
@@ -360,6 +369,24 @@ class Simulation:
         self.agent.visited_counts[position_index] += 1
 
         is_sheltered: bool = self.agent_is_sheltered()
+
+        # Batch Perception (Hot Path execution pushing arrays directly)
+        agent_ids_arr: NDArray[np.int64] = np.array([self.agent.agent_id], dtype=np.int64)
+        agent_x_arr: NDArray[np.int32] = np.array([self.agent.position.x], dtype=np.int32)
+        agent_y_arr: NDArray[np.int32] = np.array([self.agent.position.y], dtype=np.int32)
+        agent_alive_arr: NDArray[np.bool_] = np.array([self.agent.alive], dtype=np.bool_)
+
+        p_ids, p_tiles, p_kinds, p_amounts = perceive_batch_resources(
+            agent_ids_arr, agent_x_arr, agent_y_arr, agent_alive_arr, 
+            self.world, clock, self.config
+        )
+
+        water_mask: NDArray[np.bool_] = p_kinds == RESOURCE_KIND_WATER
+        food_mask: NDArray[np.bool_] = p_kinds == RESOURCE_KIND_FOOD
+        visible_water_indices: NDArray[np.int64] = p_tiles[water_mask]
+        visible_food_indices: NDArray[np.int64] = p_tiles[food_mask]
+
+        # Legacy Perception (Kept solely as a bridge for Memory and GOAP snapshots)
         observation: Observation = perceive(
             self.world,
             self.agent.position,
@@ -368,6 +395,7 @@ class Simulation:
             weather,
             is_sheltered,
         )
+        
         for sighting in observation.all_sightings():
             is_new: bool = self.memory.observe(sighting, self.tick)
             memory_record: ResourceMemory | None = self._memory_at(
@@ -449,15 +477,19 @@ class Simulation:
         before_memory_state: dict[tuple[str, int, int], tuple[int, int]] = (
             self._memory_use_state()
         )
+        
+        # Policy is entirely separated from the legacy Observation object
         action_message: str = choose_and_execute_action(
             self.agent,
             self.memory,
-            observation,
+            visible_water_indices,
+            visible_food_indices,
             self.world,
             clock,
             self.rng,
             self.config,
         )
+        
         self._record_decision_trace()
         self._record_memory_use_deltas(before_memory_state)
         self._sync_memory_markers()
@@ -508,11 +540,6 @@ class Simulation:
             )
         success: bool = exploit_discoverable(self.agent, item)
         after_tick: int = self.tick + item.interaction_ticks
-        # The exploit trajectory after-snapshot captures the immediate
-        # post-exploit state before multi-tick environmental advancement. The
-        # after_tick records modeled action duration for trajectory cost, while
-        # weather/daylight context remains the current tick;
-        # _advance_interaction_ticks() applies later environmental changes.
         after_weather: WeatherState = make_weather_state(
             is_raining=self.current_weather.is_raining,
             is_night=clock.is_night,
