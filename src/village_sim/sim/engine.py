@@ -322,8 +322,6 @@ class Simulation:
                     ),
                     sighting.position,
                 )
-        self._sync_memory_markers()
-
         new_discoverable_ids: list[str] = update_discoverable_memory(
             self.discoverable_memory,
             observation.discoverables,
@@ -340,6 +338,7 @@ class Simulation:
             if goal is not None:
                 results = self.execute_goap_plan(goal)
                 if results and all(result.success for result in results):
+                    self._sync_memory_markers()
                     if not self.agent.alive:
                         self._log_agent_death()
                     return
@@ -358,6 +357,7 @@ class Simulation:
             )
             self._log_cold_status_transition()
             self._advance_interaction_ticks(interaction_ticks)
+            self._sync_memory_markers()
             if not self.agent.alive:
                 self._log_agent_death()
             return
@@ -765,32 +765,30 @@ class Simulation:
         for memory in self.memory.resource_memories:
             key = (memory.kind.value, memory.position.x, memory.position.y)
             before_successes, before_failures = before_state.get(key, (0, 0))
+            successful_delta = memory.successful_uses - before_successes
+            failed_delta = memory.failed_uses - before_failures
+            if successful_delta <= 0 and failed_delta <= 0:
+                continue
+
             confidence = self._format_confidence(
                 memory.decayed_confidence(self.tick, self.config)
             )
-            if memory.successful_uses > before_successes:
+
+            if successful_delta > 0:
                 if memory.kind is ResourceKind.WATER:
-                    self.learning.memory_reinforced_water += (
-                        memory.successful_uses - before_successes
-                    )
+                    self.learning.memory_reinforced_water += successful_delta
                 else:
-                    self.learning.memory_reinforced_food += (
-                        memory.successful_uses - before_successes
-                    )
+                    self.learning.memory_reinforced_food += successful_delta
                 self._log_at(
                     "learning",
                     self._reinforced_memory_message(memory, confidence),
                     memory.position,
                 )
-            if memory.failed_uses > before_failures:
+            if failed_delta > 0:
                 if memory.kind is ResourceKind.WATER:
-                    self.learning.memory_failed_water += (
-                        memory.failed_uses - before_failures
-                    )
+                    self.learning.memory_failed_water += failed_delta
                 else:
-                    self.learning.memory_failed_food += (
-                        memory.failed_uses - before_failures
-                    )
+                    self.learning.memory_failed_food += failed_delta
                 self._log_at(
                     "learning",
                     self._weakened_memory_message(memory, confidence),
