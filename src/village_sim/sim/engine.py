@@ -639,10 +639,12 @@ class Simulation:
                 if result.trajectory not in self.recorded_trajectories:
                     self.recorded_trajectories.append(result.trajectory)
                     self.orchestrator.record(result.trajectory)
-                for action in self.orchestrator.synthesize_all():
-                    before_count: int = len(self.action_library.all_actions())
-                    self.action_library.add(action)
-                    after_count: int = len(self.action_library.all_actions())
+                synthesized_actions = self.orchestrator.synthesize_all()
+                if synthesized_actions:
+                    before_count = len(self.action_library.all_actions())
+                    for action in synthesized_actions:
+                        self.action_library.add(action)
+                    after_count = len(self.action_library.all_actions())
                     if after_count > before_count:
                         self.synthesized_actions_added += after_count - before_count
             if not result.success or result.death or result.timeout:
