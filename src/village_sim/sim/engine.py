@@ -545,10 +545,10 @@ class Simulation:
         self._record_timing("perception", perf_counter() - perception_start)
 
         teacher_idx, learner_idx = compute_social_interactions(
+            active_mask,
             self.agents.x,
             self.agents.y,
-            active_mask,
-            radius=2,
+            vision_radius=2,
         )
         self.action_knowledge_frame = transfer_action_knowledge(
             self.action_knowledge_frame,
