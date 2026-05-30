@@ -1170,17 +1170,20 @@ class FounderTrainingEnv:
         build_mask: NDArray[np.bool_] = (action_kind == BUILD) & (structure == 0)
 
         self.grids.terrain_kind[indices[chop_mask]] = np.int32(TerrainKind.GRASS)
-        self.grids.water_table[indices[dig_mask]] = np.minimum(
-            np.float32(1.0),
-            self.grids.water_table[indices[dig_mask]] + np.float32(0.18),
+        dig_indices: NDArray[np.int32] = indices[dig_mask]
+        np.add.at(self.grids.water_table, dig_indices, np.float32(0.18))
+        self.grids.water_table[dig_indices] = np.minimum(
+            np.float32(1.0), self.grids.water_table[dig_indices]
         )
         self.grids.crop_growth[indices[plant_mask]] = np.maximum(
             self.grids.crop_growth[indices[plant_mask]], np.float32(0.25)
         )
         self.grids.structure_kind[indices[build_mask]] = STRUCTURE_SHELTER
         self.grids.structure_health[indices[build_mask]] = np.float32(1.0)
-        self.grids.crop_growth[:] = np.minimum(
-            np.float32(1.0), self.grids.crop_growth + np.float32(0.01)
+        growing_mask: NDArray[np.bool_] = self.grids.crop_growth > np.float32(0.0)
+        self.grids.crop_growth[growing_mask] = np.minimum(
+            np.float32(1.0),
+            self.grids.crop_growth[growing_mask] + np.float32(0.01),
         )
 
         reward_value: np.float32 = np.float32(

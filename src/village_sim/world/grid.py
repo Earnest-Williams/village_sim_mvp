@@ -80,10 +80,10 @@ class WorldGrids:
             raise ValueError("water array size must match WorldGrids cell count")
         if food.size != self.cell_count:
             raise ValueError("food array size must match WorldGrids cell count")
-        np.copyto(self.terrain_kind, terrain, casting="unsafe")
-        np.copyto(self.elevation, elevation, casting="unsafe")
-        np.copyto(self.water_table, water, casting="unsafe")
-        np.copyto(self.crop_growth, food, casting="unsafe")
+        np.copyto(self.terrain_kind, terrain.ravel(), casting="unsafe")
+        np.copyto(self.elevation, elevation.ravel(), casting="unsafe")
+        np.copyto(self.water_table, water.ravel(), casting="unsafe")
+        np.copyto(self.crop_growth, food.ravel(), casting="unsafe")
         self.structure_kind.fill(STRUCTURE_NONE)
         self.structure_health.fill(np.float32(0.0))
 
