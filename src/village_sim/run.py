@@ -5,12 +5,39 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from village_sim.agent.state import MAX_AGENTS
 from village_sim.core.config import SimConfig
 from village_sim.orchestrator.action_model import ActionLibrary
 from village_sim.sim.engine import Simulation
 from village_sim.sim.metrics import SimResult
 from village_sim.sim.replay import write_run_report
 from village_sim.view.ascii_view import render_ascii_map
+
+
+def _parse_agent_count(raw_value: str) -> int:
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("agents must be an integer") from exc
+    if value < 1:
+        raise argparse.ArgumentTypeError("agents must be at least 1")
+    if value > MAX_AGENTS:
+        raise argparse.ArgumentTypeError(f"agents must be at most {MAX_AGENTS}")
+    return value
+
+
+def _config_from_args(
+    args: argparse.Namespace, *, seed: int | None = None
+) -> SimConfig:
+    return SimConfig(
+        width=args.width,
+        height=args.height,
+        max_days=args.days,
+        seed=args.seed if seed is None else seed,
+        initial_agents=getattr(args, "agents", 1),
+        enable_initial_discoverables=args.discoverables,
+        enable_goap_control=args.goap,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -22,6 +49,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--seed", type=int, default=1, help="deterministic RNG seed")
     parser.add_argument("--days", type=int, default=10, help="number of simulated days")
+    parser.add_argument(
+        "--agents",
+        type=_parse_agent_count,
+        default=1,
+        help=f"initial active agent count, from 1 to {MAX_AGENTS}",
+    )
     parser.add_argument("--width", type=int, default=32, help="world width in cells")
     parser.add_argument("--height", type=int, default=32, help="world height in cells")
     parser.add_argument(
@@ -83,21 +116,14 @@ def main() -> None:
     args: argparse.Namespace = parser.parse_args()
 
     if args.wx:
-        launch_wx_interface()
+        launch_wx_interface(args)
         return
 
     if args.batch > 1:
         run_batch(args)
         return
 
-    config = SimConfig(
-        width=args.width,
-        height=args.height,
-        max_days=args.days,
-        seed=args.seed,
-        enable_initial_discoverables=args.discoverables,
-        enable_goap_control=args.goap,
-    )
+    config = _config_from_args(args)
     sim = Simulation(config)
     if args.action_library_in is not None:
         sim.action_library = ActionLibrary.load(args.action_library_in)
@@ -124,14 +150,7 @@ def main() -> None:
 def run_batch(args: argparse.Namespace) -> None:
     results: list[SimResult] = []
     for offset in range(args.batch):
-        config = SimConfig(
-            width=args.width,
-            height=args.height,
-            max_days=args.days,
-            seed=args.seed + offset,
-            enable_initial_discoverables=args.discoverables,
-            enable_goap_control=args.goap,
-        )
+        config = _config_from_args(args, seed=args.seed + offset)
         sim = Simulation(config)
         results.append(sim.run())
 
@@ -147,12 +166,14 @@ def run_batch(args: argparse.Namespace) -> None:
     print(f"Average days elapsed: {average_days:.2f}")
     print(f"Average distance walked: {average_distance:.1f}")
     print(
-        "seed,days,survived,death,water_sites,food_sites,distance,"
-        "final_cold_stress,final_temperature_c,final_feels_cold,"
-        "final_is_sheltered,cold_weather_events,cold_status_events,shelter_events"
+        "initial_agents,final_active_agents,seed,days,survived,death,"
+        "water_sites,food_sites,distance,final_cold_stress,final_temperature_c,"
+        "final_feels_cold,final_is_sheltered,cold_weather_events,"
+        "cold_status_events,shelter_events"
     )
     for result in results:
         print(
+            f"{result.initial_agents},{result.final_active_agents},"
             f"{result.seed},{result.days_elapsed:.2f},{result.survived},"
             f"{result.death_reason},{result.remembered_water_sites},"
             f"{result.remembered_food_sites},{result.distance_walked},"
@@ -220,6 +241,10 @@ def print_cold_summary(result: SimResult) -> None:
 
 def print_result(result: SimResult) -> None:
     print(f"Seed: {result.seed}")
+    print(
+        f"Agents: initial={result.initial_agents} "
+        f"final_active={result.final_active_agents}"
+    )
     print(f"Days elapsed: {result.days_elapsed:.2f}")
     print(f"Survived: {result.survived}")
     if result.death_reason is not None:
@@ -241,16 +266,35 @@ def print_result(result: SimResult) -> None:
     print(f"Distance walked: {result.distance_walked}")
 
 
-def launch_wx_interface() -> None:
+def launch_wx_interface(args: argparse.Namespace | None = None) -> None:
     try:
-        from village_sim.view.wx_view import main as wx_main
+        from village_sim.view.wx_view import GuiInitialOptions, main as wx_main
     except ImportError as exc:
         if getattr(exc, "name", None) == "wx":
             raise SystemExit(
                 'wxPython is required for --wx. Install it with: python -m pip install "village-sim-mvp[gui]"'
             ) from exc
         raise
-    wx_main()
+
+    initial_options: GuiInitialOptions | None = None
+    if args is not None:
+        initial_options = GuiInitialOptions(
+            seed=args.seed,
+            days=args.days,
+            width=args.width,
+            height=args.height,
+            initial_agents=args.agents,
+            print_map=args.print_map,
+            batch=args.batch,
+            discoverables=args.discoverables,
+            goap=args.goap,
+            action_library_in=args.action_library_in,
+            action_library_out=args.action_library_out,
+            local_map_radius=args.local_map_radius,
+            snapshot_every=args.snapshot_every,
+            replay=args.replay,
+        )
+    wx_main(initial_options)
 
 
 if __name__ == "__main__":

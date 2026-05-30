@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 import wx
 import wx.stc as wxstc
 
+from village_sim.agent.state import MAX_AGENTS
 from village_sim.core.config import SimConfig
 from village_sim.orchestrator.action_model import ActionLibrary
 from village_sim.sim.engine import Simulation
@@ -63,6 +64,26 @@ def _make_map_font(point_size: int = MAP_DEFAULT_FONT_POINT_SIZE) -> wx.Font:
 
 
 @dataclass(frozen=True, slots=True)
+class GuiInitialOptions:
+    """Initial values used to seed wx controls from the CLI."""
+
+    seed: int = 1
+    days: int = 10
+    width: int = GUI_DEFAULT_WORLD_SIZE
+    height: int = GUI_DEFAULT_WORLD_SIZE
+    initial_agents: int = 1
+    print_map: bool = True
+    batch: int = 1
+    discoverables: bool = False
+    goap: bool = False
+    action_library_in: Path | None = None
+    action_library_out: Path | None = None
+    local_map_radius: int = 0
+    snapshot_every: int = 0
+    replay: Path | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class GuiRunOptions:
     """Validated run options collected from the wx controls."""
 
@@ -79,7 +100,10 @@ class GuiRunOptions:
 
 
 class VillageSimFrame(wx.Frame):
-    def __init__(self) -> None:
+    def __init__(self, initial_options: GuiInitialOptions | None = None) -> None:
+        options = (
+            initial_options if initial_options is not None else GuiInitialOptions()
+        )
         super().__init__(parent=None, title="Village Sim MVP", size=(980, 840))
         panel = wx.Panel(self)
         root_sizer = wx.BoxSizer(wx.VERTICAL)
@@ -88,35 +112,47 @@ class VillageSimFrame(wx.Frame):
         controls_sizer.AddGrowableCol(1, 1)
         controls_sizer.AddGrowableCol(3, 1)
 
-        self.seed_ctrl = wx.SpinCtrl(panel, min=1, max=1_000_000, initial=1)
-        self.days_ctrl = wx.SpinCtrl(panel, min=1, max=365, initial=10)
-        self.width_ctrl = wx.SpinCtrl(
-            panel, min=8, max=256, initial=GUI_DEFAULT_WORLD_SIZE
+        self.seed_ctrl = wx.SpinCtrl(panel, min=1, max=1_000_000, initial=options.seed)
+        self.days_ctrl = wx.SpinCtrl(panel, min=1, max=365, initial=options.days)
+        self.agents_ctrl = wx.SpinCtrl(
+            panel, min=1, max=MAX_AGENTS, initial=options.initial_agents
         )
-        self.height_ctrl = wx.SpinCtrl(
-            panel, min=8, max=256, initial=GUI_DEFAULT_WORLD_SIZE
+        self.width_ctrl = wx.SpinCtrl(panel, min=8, max=256, initial=options.width)
+        self.height_ctrl = wx.SpinCtrl(panel, min=8, max=256, initial=options.height)
+        self.batch_ctrl = wx.SpinCtrl(panel, min=1, max=10_000, initial=options.batch)
+        self.local_map_radius_ctrl = wx.SpinCtrl(
+            panel, min=0, max=512, initial=options.local_map_radius
         )
-        self.batch_ctrl = wx.SpinCtrl(panel, min=1, max=10_000, initial=1)
-        self.local_map_radius_ctrl = wx.SpinCtrl(panel, min=0, max=512, initial=0)
-        self.snapshot_every_ctrl = wx.SpinCtrl(panel, min=0, max=1_000_000, initial=0)
+        self.snapshot_every_ctrl = wx.SpinCtrl(
+            panel, min=0, max=1_000_000, initial=options.snapshot_every
+        )
         self.speed_ctrl = wx.SpinCtrl(panel, min=0, max=1000, initial=25)
         self.map_font_size_ctrl = wx.SpinCtrl(
             panel, min=6, max=24, initial=MAP_DEFAULT_FONT_POINT_SIZE
         )
         self.print_map_ctrl = wx.CheckBox(panel, label="Render final ASCII map")
-        self.print_map_ctrl.SetValue(True)
+        self.print_map_ctrl.SetValue(options.print_map)
         self.discoverables_ctrl = wx.CheckBox(
             panel,
             label="Seed canonical discoverables",
         )
+        self.discoverables_ctrl.SetValue(options.discoverables)
         self.goap_ctrl = wx.CheckBox(panel, label="Enable GOAP control")
+        self.goap_ctrl.SetValue(options.goap)
         self.tick_update_ctrl = wx.CheckBox(panel, label="Update map every tick")
         self.action_library_in_ctrl = wx.TextCtrl(panel)
         self.action_library_out_ctrl = wx.TextCtrl(panel)
         self.replay_ctrl = wx.TextCtrl(panel)
+        if options.action_library_in is not None:
+            self.action_library_in_ctrl.SetValue(str(options.action_library_in))
+        if options.action_library_out is not None:
+            self.action_library_out_ctrl.SetValue(str(options.action_library_out))
+        if options.replay is not None:
+            self.replay_ctrl.SetValue(str(options.replay))
 
         self._add_labeled_control(controls_sizer, panel, "Seed", self.seed_ctrl)
         self._add_labeled_control(controls_sizer, panel, "Days", self.days_ctrl)
+        self._add_labeled_control(controls_sizer, panel, "Agents", self.agents_ctrl)
         self._add_labeled_control(controls_sizer, panel, "Width", self.width_ctrl)
         self._add_labeled_control(controls_sizer, panel, "Height", self.height_ctrl)
         self._add_labeled_control(controls_sizer, panel, "Batch runs", self.batch_ctrl)
@@ -346,6 +382,7 @@ class VillageSimFrame(wx.Frame):
             height=self.height_ctrl.GetValue(),
             max_days=self.days_ctrl.GetValue(),
             seed=self.seed_ctrl.GetValue(),
+            initial_agents=self.agents_ctrl.GetValue(),
             enable_initial_discoverables=self.discoverables_ctrl.GetValue(),
             enable_goap_control=self.goap_ctrl.GetValue(),
         )
@@ -418,16 +455,7 @@ class VillageSimFrame(wx.Frame):
     def _run_batch(options: GuiRunOptions) -> str:
         results: list[SimResult] = []
         for offset in range(options.batch):
-            config = SimConfig(
-                width=options.config.width,
-                height=options.config.height,
-                max_days=options.config.max_days,
-                ticks_per_day=options.config.ticks_per_day,
-                seed=options.config.seed + offset,
-                enable_initial_discoverables=options.config.enable_initial_discoverables,
-                enable_goap_control=options.config.enable_goap_control,
-                tile_size_meters=options.config.tile_size_meters,
-            )
+            config = replace(options.config, seed=options.config.seed + offset)
             sim = Simulation(config)
             results.append(sim.run())
 
@@ -444,14 +472,15 @@ class VillageSimFrame(wx.Frame):
             f"Average days elapsed: {average_days:.2f}",
             f"Average distance walked: {average_distance:.1f}",
             (
-                "seed,days,survived,death,water_sites,food_sites,distance,"
-                "final_cold_stress,final_temperature_c,final_feels_cold,"
-                "final_is_sheltered,cold_weather_events,cold_status_events,"
-                "shelter_events"
+                "initial_agents,final_active_agents,seed,days,survived,death,"
+                "water_sites,food_sites,distance,final_cold_stress,"
+                "final_temperature_c,final_feels_cold,final_is_sheltered,"
+                "cold_weather_events,cold_status_events,shelter_events"
             ),
         ]
         for result in results:
             lines.append(
+                f"{result.initial_agents},{result.final_active_agents},"
                 f"{result.seed},{result.days_elapsed:.2f},{result.survived},"
                 f"{result.death_reason},{result.remembered_water_sites},"
                 f"{result.remembered_food_sites},{result.distance_walked},"
@@ -562,6 +591,10 @@ class VillageSimFrame(wx.Frame):
     ) -> str:
         lines: list[str] = [
             f"Seed: {result.seed}",
+            (
+                "Agents: "
+                f"initial={result.initial_agents} final_active={result.final_active_agents}"
+            ),
             f"Days elapsed: {result.days_elapsed:.2f}",
             f"Survived: {result.survived}",
             f"Death reason: {result.death_reason or 'n/a'}",
@@ -625,8 +658,8 @@ class VillageSimFrame(wx.Frame):
         return "\n".join(lines)
 
 
-def main() -> None:
+def main(initial_options: GuiInitialOptions | None = None) -> None:
     app = wx.App(False)
-    frame = VillageSimFrame()
+    frame = VillageSimFrame(initial_options)
     frame.Show(True)
     app.MainLoop()

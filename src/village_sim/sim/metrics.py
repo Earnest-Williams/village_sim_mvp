@@ -76,6 +76,8 @@ class SimResult:
     distance_walked: int
     remembered_water_sites: int
     remembered_food_sites: int
+    initial_agents: int = 1
+    final_active_agents: int = 1
     learning: LearningStats = field(default_factory=LearningStats)
     best_water_memory_x: int = -1
     best_water_memory_y: int = -1
