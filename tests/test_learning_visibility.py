@@ -167,7 +167,9 @@ class LearningVisibilityTests(unittest.TestCase):
         self.assertLessEqual(result.learning.memory_use_ratio, 1.0)
         self.assertGreaterEqual(result.learning.learned_water_sites, 0)
 
-    def test_map_memory_overlay_and_agent_priority(self) -> None:
+    def test_map_hides_resource_memory_glyphs_and_preserves_agent_priority(
+        self,
+    ) -> None:
         world = _empty_world(8, 8)
         agent = AgentState(agent_id=1, position=Position(x=1, y=1))
         agent.memory_markers = [
@@ -188,13 +190,16 @@ class LearningVisibilityTests(unittest.TestCase):
             ),
         ]
 
-        chars = [
-            [glyph.char for glyph in row] for row in render_map_model(world, agent).rows
-        ]
+        rendered = render_map_model(world, agent)
 
-        self.assertIn(chars[2][2], {"w", "W"})
-        self.assertIn(chars[2][3], {"f", "F"})
-        self.assertEqual(chars[1][1], "@")
+        water_marker = rendered.rows[2][2]
+        food_marker = rendered.rows[2][3]
+
+        self.assertIn(water_marker.role, {'grass', 'brush'})
+        self.assertIn(food_marker.role, {'grass', 'brush'})
+        self.assertIn(water_marker.char, {'.', ',', '\"'})
+        self.assertIn(food_marker.char, {'.', ',', '\"'})
+        self.assertEqual(rendered.rows[1][1].char, "@")
 
     def test_replay_snapshot_decision_fields(self) -> None:
         sim = _controlled_simulation()
@@ -214,10 +219,10 @@ class LearningVisibilityTests(unittest.TestCase):
         self.assertEqual(agent_snapshot.decision_target_x, 2)
         self.assertEqual(agent_snapshot.decision_target_y, 1)
 
-    def test_gui_stc_styles_for_remembered_sites(self) -> None:
+    def test_gui_stc_omits_resource_memory_styles(self) -> None:
         for role in ("remembered_water", "remembered_food", "stale_memory"):
-            self.assertIn(role, ROLE_COLORS)
-            self.assertIn(role, STC_ROLE_STYLE)
+            self.assertNotIn(role, ROLE_COLORS)
+            self.assertNotIn(role, STC_ROLE_STYLE)
 
 
 def _agent_memory() -> AgentMemory:

@@ -17,9 +17,6 @@ STC_ROLE_STYLE: dict[str, int] = {
     "agent": 2,
     "agent_sleeping": 3,
     "water": 4,
-    "remembered_water": 14,
-    "remembered_food": 15,
-    "stale_memory": 16,
     "broadleaf": 5,
     "evergreen": 6,
     "grass": 7,
@@ -85,7 +82,11 @@ def _wx_header_lines(rendered_map: RenderedMap) -> list[str]:
 
     legend_parts = rendered_map.legend.split(" | Scale: ", maxsplit=1)
     legend = legend_parts[0]
-    legend_items = legend.removeprefix("Legend: ").split(", ") if legend.startswith("Legend: ") else legend.split(", ")
+    legend_items = (
+        legend.removeprefix("Legend: ").split(", ")
+        if legend.startswith("Legend: ")
+        else legend.split(", ")
+    )
     if len(legend_items) > 5:
         lines.append("Legend: " + ", ".join(legend_items[:5]))
         lines.append("        " + ", ".join(legend_items[5:]))
