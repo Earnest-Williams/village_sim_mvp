@@ -5,9 +5,36 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Any, Iterable
+
+import numpy as np
+from numpy.typing import NDArray
 
 from village_sim.core.config import SimConfig
 from village_sim.core.types import TerrainKind
+
+FloatGrid = NDArray[np.float64]
+IntGrid = NDArray[np.int64]
+BoolGrid = NDArray[np.bool_]
+MutableFloatGrid = list[float] | FloatGrid
+TerrainGrid = list[int] | IntGrid
+
+
+class ComparableFloatArray(np.ndarray[Any, np.dtype[np.float64]]):
+    """Float ndarray with test-friendly scalar equality for lists."""
+
+    def __eq__(self, other: object) -> bool:
+        return bool(
+            np.array_equal(np.asarray(self), np.asarray(other, dtype=np.float64))
+        )
+
+
+def _comparable_float(values: FloatGrid) -> ComparableFloatArray:
+    return values.astype(np.float64, copy=False).view(ComparableFloatArray)
+
+
+_NEIGHBOR_COUNT = 4
+_NO_NEIGHBOR = -1
 
 
 class RainKind(StrEnum):
@@ -76,29 +103,125 @@ class RainSystem:
         return self.active_event
 
 
-def _new_active_set() -> set[int]:
-    return set()
+@dataclass(slots=True)
+class ActiveMask:
+    """Set-like active tile mask backed by one contiguous boolean array."""
+
+    mask: BoolGrid
+
+    def add(self, index: int) -> None:
+        self.mask[index] = True
+
+    def clear(self) -> None:
+        self.mask.fill(False)
+
+    def update(self, indices: Iterable[int] | IntGrid | BoolGrid) -> None:
+        if isinstance(indices, np.ndarray) and indices.dtype == np.bool_:
+            self.mask |= np.asarray(indices, dtype=np.bool_)
+            return
+        index_values: IntGrid = np.fromiter(indices, dtype=np.int64)
+        if index_values.size > 0:
+            self.mask[index_values] = True
+
+    def to_indices(self) -> IntGrid:
+        return np.flatnonzero(self.mask).astype(np.int64)
+
+    def __contains__(self, index: object) -> bool:
+        return isinstance(index, int) and bool(self.mask[index])
+
+    def __bool__(self) -> bool:
+        return bool(np.any(self.mask))
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, set):
+            return set(self.to_indices().tolist()) == other
+        if isinstance(other, ActiveMask):
+            return bool(np.array_equal(self.mask, other.mask))
+        return False
+
+
+def _new_active_mask(cell_count: int) -> ActiveMask:
+    return ActiveMask(np.zeros(cell_count, dtype=np.bool_))
 
 
 @dataclass(slots=True)
 class WaterSystemState:
-    """Persistent hydrology state stored as flat row-major arrays."""
+    """Persistent hydrology state stored as flat row-major NumPy arrays."""
 
-    wetness: list[float]
-    soil_water: list[float]
-    soil_capacity: list[float]
-    soil_drainage: list[float]
-    infiltration: list[float]
-    runoff: list[float]
-    base_water: list[float]
-    bankfull_level: list[float]
-    catchment: list[bool]
-    permanent_water: list[bool]
-    outdoor_indices: list[int]
-    bank_indices: list[list[int]]
-    neighbors4: list[tuple[int, ...]]
-    fluid_active: set[int] = field(default_factory=_new_active_set)
-    flood_active: set[int] = field(default_factory=_new_active_set)
+    wetness: FloatGrid
+    soil_water: FloatGrid
+    soil_capacity: FloatGrid
+    soil_drainage: FloatGrid
+    infiltration: FloatGrid
+    runoff: FloatGrid
+    base_water: FloatGrid
+    bankfull_level: FloatGrid
+    catchment: BoolGrid
+    permanent_water: BoolGrid
+    outdoor_indices: IntGrid
+    bank_indices: tuple[IntGrid, IntGrid, IntGrid, IntGrid]
+    neighbors4: IntGrid
+    fluid_active: ActiveMask = field(init=False)
+    flood_active: ActiveMask = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.wetness = _comparable_float(np.asarray(self.wetness, dtype=np.float64))
+        self.soil_water = _comparable_float(
+            np.asarray(self.soil_water, dtype=np.float64)
+        )
+        self.soil_capacity = _comparable_float(
+            np.asarray(self.soil_capacity, dtype=np.float64)
+        )
+        self.soil_drainage = _comparable_float(
+            np.asarray(self.soil_drainage, dtype=np.float64)
+        )
+        self.infiltration = _comparable_float(
+            np.asarray(self.infiltration, dtype=np.float64)
+        )
+        self.runoff = _comparable_float(np.asarray(self.runoff, dtype=np.float64))
+        self.base_water = _comparable_float(
+            np.asarray(self.base_water, dtype=np.float64)
+        )
+        self.bankfull_level = _comparable_float(
+            np.asarray(self.bankfull_level, dtype=np.float64)
+        )
+        cell_count: int = int(self.wetness.size)
+        self.fluid_active = _new_active_mask(cell_count)
+        self.flood_active = _new_active_mask(cell_count)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        float_fields: set[str] = {
+            "wetness",
+            "soil_water",
+            "soil_capacity",
+            "soil_drainage",
+            "infiltration",
+            "runoff",
+            "base_water",
+            "bankfull_level",
+        }
+        if name in float_fields:
+            array_value: ComparableFloatArray = _comparable_float(
+                np.asarray(value, dtype=np.float64)
+            )
+            object.__setattr__(self, name, array_value)
+            return
+        object.__setattr__(self, name, value)
+
+
+def _as_float_grid(values: MutableFloatGrid) -> FloatGrid:
+    return np.asarray(values, dtype=np.float64)
+
+
+def _as_int_grid(values: TerrainGrid) -> IntGrid:
+    return np.asarray(values, dtype=np.int64)
+
+
+def _sync_float_grid(target: MutableFloatGrid, values: FloatGrid) -> None:
+    if isinstance(target, np.ndarray):
+        target[...] = values
+        return
+    target[:] = values.astype(np.float64, copy=False).tolist()
 
 
 def choose_rain_profile(rng: random.Random, config: SimConfig) -> RainProfile:
@@ -142,49 +265,81 @@ def choose_rain_profile(rng: random.Random, config: SimConfig) -> RainProfile:
     )
 
 
+def _neighbor_indices(width: int, height: int) -> IntGrid:
+    indices: IntGrid = np.arange(width * height, dtype=np.int64).reshape(height, width)
+    neighbors: IntGrid = np.full((width * height, _NEIGHBOR_COUNT), _NO_NEIGHBOR)
+    north_rows: IntGrid = indices[1:, :].reshape(-1)
+    west_rows: IntGrid = indices[:, 1:].reshape(-1)
+    east_rows: IntGrid = indices[:, :-1].reshape(-1)
+    south_rows: IntGrid = indices[:-1, :].reshape(-1)
+    neighbors[north_rows, 0] = indices[:-1, :].reshape(-1)
+    neighbors[west_rows, 1] = indices[:, :-1].reshape(-1)
+    neighbors[east_rows, 2] = indices[:, 1:].reshape(-1)
+    neighbors[south_rows, 3] = indices[1:, :].reshape(-1)
+    return neighbors
+
+
 def build_water_system_state(
     *,
     width: int,
     height: int,
-    terrain: list[int],
-    water: list[float],
+    terrain: TerrainGrid,
+    water: MutableFloatGrid,
 ) -> WaterSystemState:
     """Build flat-array hydrology state from terrain and current water."""
 
     cell_count: int = width * height
-    wetness: list[float] = [0.0 for _ in range(cell_count)]
-    soil_water: list[float] = [0.0 for _ in range(cell_count)]
-    soil_capacity: list[float] = [0.0 for _ in range(cell_count)]
-    soil_drainage: list[float] = [0.0 for _ in range(cell_count)]
-    infiltration: list[float] = [0.0 for _ in range(cell_count)]
-    runoff: list[float] = [0.0 for _ in range(cell_count)]
-    base_water: list[float] = [0.0 for _ in range(cell_count)]
-    bankfull_level: list[float] = [0.0 for _ in range(cell_count)]
-    catchment: list[bool] = [False for _ in range(cell_count)]
-    permanent_water: list[bool] = [False for _ in range(cell_count)]
-    outdoor_indices: list[int] = []
-    bank_indices: list[list[int]] = [[], [], [], []]
-    neighbors4: list[tuple[int, ...]] = []
+    terrain_values: IntGrid = _as_int_grid(terrain).reshape(cell_count)
+    wetness: FloatGrid = np.zeros(cell_count, dtype=np.float64)
+    soil_water: FloatGrid = np.zeros(cell_count, dtype=np.float64)
+    soil_capacity: FloatGrid = np.full(cell_count, 0.70, dtype=np.float64)
+    soil_drainage: FloatGrid = np.full(cell_count, 0.05, dtype=np.float64)
+    infiltration: FloatGrid = np.full(cell_count, 0.60, dtype=np.float64)
+    runoff: FloatGrid = np.full(cell_count, 0.35, dtype=np.float64)
+    base_water: FloatGrid = np.zeros(cell_count, dtype=np.float64)
+    bankfull_level: FloatGrid = np.zeros(cell_count, dtype=np.float64)
 
-    for index in range(cell_count):
-        terrain_kind: TerrainKind = TerrainKind(terrain[index])
-        outdoor_indices.append(index)
-        bank_indices[index & 3].append(index)
-        soil_capacity[index] = _soil_capacity_for(terrain_kind)
-        soil_drainage[index] = _soil_drainage_for(terrain_kind)
-        infiltration[index] = _infiltration_for(terrain_kind)
-        runoff[index] = _runoff_for(terrain_kind)
+    water_mask: BoolGrid = terrain_values == int(TerrainKind.WATER)
+    rock_mask: BoolGrid = terrain_values == int(TerrainKind.ROCK)
+    hill_mask: BoolGrid = terrain_values == int(TerrainKind.HILL)
+    forest_mask: BoolGrid = terrain_values == int(TerrainKind.FOREST)
 
-        if terrain_kind is TerrainKind.WATER:
-            permanent_water[index] = True
-            catchment[index] = True
-            base_water[index] = 0.65
-            bankfull_level[index] = 1.25
-            water[index] = max(water[index], base_water[index])
-        else:
-            catchment[index] = _is_non_water_catchment(terrain_kind)
+    soil_capacity[water_mask] = 0.0
+    soil_capacity[rock_mask] = 0.10
+    soil_capacity[hill_mask] = 0.45
+    soil_capacity[forest_mask] = 0.90
 
-        neighbors4.append(_neighbors4(width, height, index))
+    soil_drainage[water_mask] = 0.0
+    soil_drainage[rock_mask] = 0.01
+    soil_drainage[hill_mask] = 0.06
+    soil_drainage[forest_mask] = 0.04
+
+    infiltration[water_mask] = 0.0
+    infiltration[rock_mask] = 0.10
+    infiltration[hill_mask] = 0.35
+    infiltration[forest_mask] = 0.75
+
+    runoff[water_mask] = 1.00
+    runoff[rock_mask] = 0.90
+    runoff[hill_mask] = 0.60
+    runoff[forest_mask] = 0.20
+
+    catchment: BoolGrid = water_mask | hill_mask
+    base_water[water_mask] = 0.65
+    bankfull_level[water_mask] = 1.25
+    water_values: FloatGrid = _as_float_grid(water).reshape(cell_count).copy()
+    water_values[water_mask] = np.maximum(
+        water_values[water_mask], base_water[water_mask]
+    )
+    _sync_float_grid(water, water_values)
+
+    indices: IntGrid = np.arange(cell_count, dtype=np.int64)
+    bank_indices: tuple[IntGrid, IntGrid, IntGrid, IntGrid] = (
+        indices[(indices & 3) == 0],
+        indices[(indices & 3) == 1],
+        indices[(indices & 3) == 2],
+        indices[(indices & 3) == 3],
+    )
 
     return WaterSystemState(
         wetness=wetness,
@@ -196,398 +351,484 @@ def build_water_system_state(
         base_water=base_water,
         bankfull_level=bankfull_level,
         catchment=catchment,
-        permanent_water=permanent_water,
-        outdoor_indices=outdoor_indices,
+        permanent_water=water_mask.copy(),
+        outdoor_indices=indices,
         bank_indices=bank_indices,
-        neighbors4=neighbors4,
+        neighbors4=_neighbor_indices(width, height),
     )
 
 
 def step_sampled_rain(
     *,
     rng: random.Random,
-    water: list[float],
+    water: MutableFloatGrid,
     state: WaterSystemState,
     event: RainEvent,
     config: SimConfig,
 ) -> None:
     """Apply active rain to a random sample of outdoor tile indices."""
 
-    if not event.is_raining or not state.outdoor_indices:
+    if not event.is_raining or state.outdoor_indices.size == 0:
         return
 
     sample_count: int = max(
         1,
-        int(float(len(state.outdoor_indices)) * event.profile.sample_fraction),
+        int(float(state.outdoor_indices.size) * event.profile.sample_fraction),
     )
-    sampled_indices: list[int] = rng.sample(
-        state.outdoor_indices,
-        min(len(state.outdoor_indices), sample_count),
+    sampled_indices: IntGrid = np.asarray(
+        rng.sample(
+            state.outdoor_indices.tolist(),
+            min(int(state.outdoor_indices.size), sample_count),
+        ),
+        dtype=np.int64,
     )
-    for sampled_index in sampled_indices:
-        if state.catchment[sampled_index]:
-            water[sampled_index] = min(
-                config.max_surface_water_depth,
-                water[sampled_index] + event.profile.catchment_gain,
-            )
-            state.fluid_active.add(sampled_index)
-            if state.permanent_water[sampled_index]:
-                state.flood_active.add(sampled_index)
-            continue
+    if sampled_indices.size == 0:
+        return
 
-        if rng.random() >= event.profile.puddle_rate:
-            continue
-
-        rain_amount: float = rng.uniform(event.profile.rain_min, event.profile.rain_max)
-        apply_rain_to_tile(
-            index=sampled_index,
-            rain_amount=rain_amount,
-            water=water,
-            state=state,
-            config=config,
+    water_values: FloatGrid = _as_float_grid(water).reshape(state.wetness.size).copy()
+    catchment_mask: BoolGrid = state.catchment[sampled_indices]
+    catchment_indices: IntGrid = sampled_indices[catchment_mask]
+    if catchment_indices.size > 0:
+        water_values[catchment_indices] = np.minimum(
+            config.max_surface_water_depth,
+            water_values[catchment_indices] + event.profile.catchment_gain,
         )
+        state.fluid_active.update(catchment_indices)
+        state.flood_active.update(
+            catchment_indices[state.permanent_water[catchment_indices]]
+        )
+
+    puddle_candidates: IntGrid = sampled_indices[~catchment_mask]
+    if puddle_candidates.size > 0:
+        puddle_indices_list: list[int] = []
+        rain_amounts_list: list[float] = []
+        for candidate in puddle_candidates.tolist():
+            if rng.random() < event.profile.puddle_rate:
+                puddle_indices_list.append(int(candidate))
+                rain_amounts_list.append(
+                    rng.uniform(event.profile.rain_min, event.profile.rain_max)
+                )
+        if puddle_indices_list:
+            _apply_rain_to_indices(
+                indices=np.asarray(puddle_indices_list, dtype=np.int64),
+                rain_amounts=np.asarray(rain_amounts_list, dtype=np.float64),
+                water_values=water_values,
+                state=state,
+                config=config,
+            )
+
+    _sync_float_grid(water, water_values)
 
 
 def apply_rain_to_tile(
     *,
     index: int,
     rain_amount: float,
-    water: list[float],
+    water: MutableFloatGrid,
     state: WaterSystemState,
     config: SimConfig,
 ) -> None:
     """Apply one sampled rainfall amount to one tile."""
 
-    if state.permanent_water[index]:
-        water[index] = min(config.max_surface_water_depth, water[index] + rain_amount)
-        state.fluid_active.add(index)
-        state.flood_active.add(index)
-        return
+    water_values: FloatGrid = _as_float_grid(water).reshape(state.wetness.size).copy()
+    _apply_rain_to_indices(
+        indices=np.asarray([index], dtype=np.int64),
+        rain_amounts=np.asarray([rain_amount], dtype=np.float64),
+        water_values=water_values,
+        state=state,
+        config=config,
+    )
+    _sync_float_grid(water, water_values)
 
-    state.wetness[index] = min(1.0, state.wetness[index] + rain_amount)
-    soil_room: float = max(0.0, state.soil_capacity[index] - state.soil_water[index])
-    absorbed: float = min(soil_room, rain_amount * state.infiltration[index])
-    state.soil_water[index] += absorbed
-    runoff_amount: float = max(0.0, rain_amount - absorbed) * state.runoff[index]
-    if runoff_amount <= 0.0:
-        return
 
-    water[index] = min(config.max_surface_water_depth, water[index] + runoff_amount)
-    if water[index] >= config.surface_water_active_threshold:
-        state.fluid_active.add(index)
+def _apply_rain_to_indices(
+    *,
+    indices: IntGrid,
+    rain_amounts: FloatGrid,
+    water_values: FloatGrid,
+    state: WaterSystemState,
+    config: SimConfig,
+) -> None:
+    permanent_mask: BoolGrid = state.permanent_water[indices]
+    permanent_indices: IntGrid = indices[permanent_mask]
+    if permanent_indices.size > 0:
+        permanent_amounts: FloatGrid = rain_amounts[permanent_mask]
+        water_values[permanent_indices] = np.minimum(
+            config.max_surface_water_depth,
+            water_values[permanent_indices] + permanent_amounts,
+        )
+        state.fluid_active.update(permanent_indices)
+        state.flood_active.update(permanent_indices)
+
+    soil_indices: IntGrid = indices[~permanent_mask]
+    if soil_indices.size == 0:
+        return
+    soil_amounts: FloatGrid = rain_amounts[~permanent_mask]
+    state.wetness[soil_indices] = np.minimum(
+        1.0, state.wetness[soil_indices] + soil_amounts
+    )
+    soil_room: FloatGrid = np.maximum(
+        0.0, state.soil_capacity[soil_indices] - state.soil_water[soil_indices]
+    )
+    absorbed: FloatGrid = np.minimum(
+        soil_room, soil_amounts * state.infiltration[soil_indices]
+    )
+    state.soil_water[soil_indices] += absorbed
+    runoff_amount: FloatGrid = (
+        np.maximum(0.0, soil_amounts - absorbed) * state.runoff[soil_indices]
+    )
+    runoff_mask: BoolGrid = runoff_amount > 0.0
+    runoff_indices: IntGrid = soil_indices[runoff_mask]
+    if runoff_indices.size == 0:
+        return
+    water_values[runoff_indices] = np.minimum(
+        config.max_surface_water_depth,
+        water_values[runoff_indices] + runoff_amount[runoff_mask],
+    )
+    active_mask: BoolGrid = (
+        water_values[runoff_indices] >= config.surface_water_active_threshold
+    )
+    state.fluid_active.update(runoff_indices[active_mask])
 
 
 def step_active_water_flow(
     *,
-    water: list[float],
-    height_map: list[float],
+    water: MutableFloatGrid,
+    height_map: MutableFloatGrid,
     state: WaterSystemState,
     config: SimConfig,
 ) -> None:
-    """Process only active surface water and active flood source tiles."""
+    """Process active surface water and active flood source tiles."""
 
     if not state.fluid_active and not state.flood_active:
         return
 
-    delta: dict[int, float] = {}
-    next_active: set[int] = set()
-    active_indices: set[int] = set(state.fluid_active)
-    active_indices.update(state.flood_active)
+    water_values: FloatGrid = _as_float_grid(water).reshape(state.wetness.size).copy()
+    heights: FloatGrid = _as_float_grid(height_map).reshape(state.wetness.size)
+    active_mask: BoolGrid = state.fluid_active.mask | state.flood_active.mask
     state.fluid_active.clear()
     state.flood_active.clear()
 
-    for index in sorted(active_indices):
-        current_water: float = water[index]
-
-        if state.permanent_water[index]:
-            if current_water > state.bankfull_level[index]:
-                _spill_floodwater(
-                    index=index,
-                    water=water,
-                    height_map=height_map,
-                    state=state,
-                    config=config,
-                    delta=delta,
-                    next_active=next_active,
-                )
-            else:
-                _restore_base_water(index, water, state)
-            continue
-
-        movable_water: float = max(0.0, current_water - state.base_water[index])
-        if movable_water < config.surface_water_active_threshold:
-            _restore_base_water(index, water, state)
-            continue
-
-        moved: bool = _move_downhill_or_sideways(
-            index=index,
-            water=water,
-            height_map=height_map,
+    permanent_active: BoolGrid = active_mask & state.permanent_water
+    flood_sources: IntGrid = np.flatnonzero(
+        permanent_active & (water_values > state.bankfull_level)
+    ).astype(np.int64)
+    next_active: BoolGrid = np.zeros_like(active_mask)
+    delta: FloatGrid = np.zeros_like(water_values)
+    if flood_sources.size > 0:
+        _spill_floodwater_vectorized(
+            indices=flood_sources,
+            water_values=water_values,
+            heights=heights,
             state=state,
             config=config,
             delta=delta,
             next_active=next_active,
         )
-        if not moved:
-            _infiltrate_surface_water(
-                index=index,
-                water=water,
-                state=state,
-                config=config,
-                next_active=next_active,
-            )
-
-    for index, change in delta.items():
-        water[index] = max(state.base_water[index], water[index] + change)
-        if water[index] >= config.surface_water_active_threshold:
-            next_active.add(index)
-        if state.permanent_water[index] and water[index] > state.bankfull_level[index]:
-            state.flood_active.add(index)
-
-    state.fluid_active.update(
-        index
-        for index in next_active
-        if not state.permanent_water[index]
-        and water[index] >= config.surface_water_active_threshold
+    restore_permanent: BoolGrid = permanent_active & (
+        water_values <= state.bankfull_level
     )
+    water_values[restore_permanent] = np.maximum(
+        water_values[restore_permanent], state.base_water[restore_permanent]
+    )
+
+    movable_mask: BoolGrid = (
+        active_mask
+        & ~state.permanent_water
+        & ((water_values - state.base_water) >= config.surface_water_active_threshold)
+    )
+    movable_indices: IntGrid = np.flatnonzero(movable_mask).astype(np.int64)
+    moved_mask: BoolGrid = np.zeros_like(active_mask)
+    if movable_indices.size > 0:
+        moved_indices: IntGrid = _move_downhill_or_sideways_vectorized(
+            indices=movable_indices,
+            water_values=water_values,
+            heights=heights,
+            state=state,
+            config=config,
+            delta=delta,
+            next_active=next_active,
+        )
+        moved_mask[moved_indices] = True
+
+    still_indices: IntGrid = movable_indices[~moved_mask[movable_indices]]
+    if still_indices.size > 0:
+        _infiltrate_surface_water_vectorized(
+            indices=still_indices,
+            water_values=water_values,
+            state=state,
+            config=config,
+            next_active=next_active,
+        )
+
+    changed: BoolGrid = delta != 0.0
+    water_values[changed] = np.maximum(
+        state.base_water[changed], water_values[changed] + delta[changed]
+    )
+    next_active |= changed & (water_values >= config.surface_water_active_threshold)
+    state.flood_active.update(
+        state.permanent_water & (water_values > state.bankfull_level) & changed
+    )
+    state.fluid_active.update(
+        next_active
+        & ~state.permanent_water
+        & (water_values >= config.surface_water_active_threshold)
+    )
+    _sync_float_grid(water, water_values)
+
+
+def _move_downhill_or_sideways_vectorized(
+    *,
+    indices: IntGrid,
+    water_values: FloatGrid,
+    heights: FloatGrid,
+    state: WaterSystemState,
+    config: SimConfig,
+    delta: FloatGrid,
+    next_active: BoolGrid,
+) -> IntGrid:
+    neighbors: IntGrid = state.neighbors4[indices]
+    valid: BoolGrid = neighbors >= 0
+    safe_neighbors: IntGrid = np.where(valid, neighbors, 0)
+    surface: FloatGrid = heights + water_values * config.water_height_scale
+    neighbor_surface: FloatGrid = np.where(valid, surface[safe_neighbors], np.inf)
+    lower_height: BoolGrid = np.where(
+        valid, heights[safe_neighbors] < heights[indices, None], False
+    )
+    downhill_surface: FloatGrid = np.where(lower_height, neighbor_surface, np.inf)
+    best_downhill_slot: IntGrid = np.argmin(downhill_surface, axis=1)
+    row_numbers: IntGrid = np.arange(indices.size, dtype=np.int64)
+    best_downhill_surface: FloatGrid = downhill_surface[row_numbers, best_downhill_slot]
+    downhill_mask: BoolGrid = np.isfinite(best_downhill_surface) & (
+        best_downhill_surface < surface[indices]
+    )
+    moved_indices: list[IntGrid] = []
+
+    if np.any(downhill_mask):
+        sources: IntGrid = indices[downhill_mask]
+        targets: IntGrid = safe_neighbors[
+            row_numbers[downhill_mask], best_downhill_slot[downhill_mask]
+        ]
+        height_drop: FloatGrid = surface[sources] - best_downhill_surface[downhill_mask]
+        flows: FloatGrid = np.minimum(
+            water_values[sources] - state.base_water[sources],
+            water_values[sources]
+            * config.downhill_flow_fraction
+            * np.maximum(0.20, height_drop * 12.0),
+        )
+        positive: BoolGrid = flows > 0.0
+        if np.any(positive):
+            sources = sources[positive]
+            targets = targets[positive]
+            flows = flows[positive]
+            np.add.at(delta, sources, -flows)
+            np.add.at(delta, targets, flows)
+            next_active[sources] = True
+            next_active[targets] = True
+            moved_indices.append(sources)
+
+    remaining_indices: IntGrid = indices[~downhill_mask]
+    if remaining_indices.size > 0:
+        moved_sideways: IntGrid = _move_sideways_vectorized(
+            indices=remaining_indices,
+            water_values=water_values,
+            heights=heights,
+            surface=surface,
+            state=state,
+            config=config,
+            delta=delta,
+            next_active=next_active,
+        )
+        if moved_sideways.size > 0:
+            moved_indices.append(moved_sideways)
+
+    if not moved_indices:
+        return np.empty(0, dtype=np.int64)
+    return np.concatenate(moved_indices).astype(np.int64)
+
+
+def _move_sideways_vectorized(
+    *,
+    indices: IntGrid,
+    water_values: FloatGrid,
+    heights: FloatGrid,
+    surface: FloatGrid,
+    state: WaterSystemState,
+    config: SimConfig,
+    delta: FloatGrid,
+    next_active: BoolGrid,
+) -> IntGrid:
+    neighbors: IntGrid = state.neighbors4[indices]
+    valid: BoolGrid = neighbors >= 0
+    safe_neighbors: IntGrid = np.where(valid, neighbors, 0)
+    allowed_height: BoolGrid = np.where(
+        valid,
+        heights[safe_neighbors] <= heights[indices, None] + config.sideways_height_slop,
+        False,
+    )
+    neighbor_surface: FloatGrid = np.where(
+        allowed_height, surface[safe_neighbors], np.inf
+    )
+    best_slot: IntGrid = np.argmin(neighbor_surface, axis=1)
+    rows: IntGrid = np.arange(indices.size, dtype=np.int64)
+    best_surface: FloatGrid = neighbor_surface[rows, best_slot]
+    spread_candidates: BoolGrid = np.isfinite(best_surface) & (
+        best_surface < surface[indices]
+    )
+    if not np.any(spread_candidates):
+        return np.empty(0, dtype=np.int64)
+
+    sources: IntGrid = indices[spread_candidates]
+    targets: IntGrid = safe_neighbors[
+        rows[spread_candidates], best_slot[spread_candidates]
+    ]
+    depth_difference: FloatGrid = water_values[sources] - water_values[targets]
+    spread_mask: BoolGrid = depth_difference > config.sideways_min_depth_difference
+    if not np.any(spread_mask):
+        return np.empty(0, dtype=np.int64)
+
+    sources = sources[spread_mask]
+    targets = targets[spread_mask]
+    spreads: FloatGrid = np.minimum(
+        water_values[sources] - state.base_water[sources],
+        depth_difference[spread_mask] * config.sideways_spread_fraction,
+    )
+    positive: BoolGrid = spreads > 0.0
+    if not np.any(positive):
+        return np.empty(0, dtype=np.int64)
+
+    sources = sources[positive]
+    targets = targets[positive]
+    spreads = spreads[positive]
+    np.add.at(delta, sources, -spreads)
+    np.add.at(delta, targets, spreads)
+    next_active[sources] = True
+    next_active[targets] = True
+    return sources
+
+
+def _spill_floodwater_vectorized(
+    *,
+    indices: IntGrid,
+    water_values: FloatGrid,
+    heights: FloatGrid,
+    state: WaterSystemState,
+    config: SimConfig,
+    delta: FloatGrid,
+    next_active: BoolGrid,
+) -> None:
+    excess: FloatGrid = water_values[indices] - state.bankfull_level[indices]
+    positive: BoolGrid = excess > 0.0
+    if not np.any(positive):
+        return
+    sources: IntGrid = indices[positive]
+    excess = excess[positive]
+    neighbors: IntGrid = state.neighbors4[sources]
+    valid: BoolGrid = neighbors >= 0
+    safe_neighbors: IntGrid = np.where(valid, neighbors, 0)
+    spill_allowed: BoolGrid = (
+        valid
+        & ~state.permanent_water[safe_neighbors]
+        & (heights[safe_neighbors] <= heights[sources, None])
+    )
+    neighbor_heights: FloatGrid = np.where(
+        spill_allowed, heights[safe_neighbors], np.inf
+    )
+    best_slot: IntGrid = np.argmin(neighbor_heights, axis=1)
+    rows: IntGrid = np.arange(sources.size, dtype=np.int64)
+    target_height: FloatGrid = neighbor_heights[rows, best_slot]
+    has_target: BoolGrid = np.isfinite(target_height)
+
+    drain_sources: IntGrid = sources[~has_target]
+    if drain_sources.size > 0:
+        drains: FloatGrid = np.minimum(excess[~has_target], config.off_map_drain_rate)
+        np.add.at(delta, drain_sources, -drains)
+        next_active[drain_sources] = True
+
+    spill_sources: IntGrid = sources[has_target]
+    if spill_sources.size == 0:
+        return
+    targets: IntGrid = safe_neighbors[rows[has_target], best_slot[has_target]]
+    spills: FloatGrid = excess[has_target] * config.flood_spill_fraction
+    np.add.at(delta, spill_sources, -spills)
+    np.add.at(delta, targets, spills)
+    next_active[spill_sources] = True
+    next_active[targets] = True
+
+
+def _infiltrate_surface_water_vectorized(
+    *,
+    indices: IntGrid,
+    water_values: FloatGrid,
+    state: WaterSystemState,
+    config: SimConfig,
+    next_active: BoolGrid,
+) -> None:
+    soil_room: FloatGrid = np.maximum(
+        0.0, state.soil_capacity[indices] - state.soil_water[indices]
+    )
+    absorbed: FloatGrid = np.minimum(
+        soil_room, config.surface_infiltration_per_fluid_tick
+    )
+    absorb_mask: BoolGrid = absorbed > 0.0
+    absorb_indices: IntGrid = indices[absorb_mask]
+    if absorb_indices.size > 0:
+        state.soil_water[absorb_indices] += absorbed[absorb_mask]
+        water_values[absorb_indices] = np.maximum(
+            0.0, water_values[absorb_indices] - absorbed[absorb_mask]
+        )
+    active_indices: IntGrid = indices[
+        water_values[indices] >= config.surface_water_active_threshold
+    ]
+    next_active[active_indices] = True
 
 
 def step_water_maintenance_bank(
     *,
     tick: int,
-    water: list[float],
+    water: MutableFloatGrid,
     state: WaterSystemState,
     config: SimConfig,
 ) -> None:
     """Process one quarter-map bank of slow water maintenance."""
 
     bank: int = tick & 3
-    for index in state.bank_indices[bank]:
-        if state.permanent_water[index]:
-            _restore_base_water(index, water, state)
-            if water[index] > state.bankfull_level[index]:
-                state.flood_active.add(index)
-            continue
+    indices: IntGrid = state.bank_indices[bank]
+    if indices.size == 0:
+        return
+    water_values: FloatGrid = _as_float_grid(water).reshape(state.wetness.size).copy()
+    permanent_indices: IntGrid = indices[state.permanent_water[indices]]
+    if permanent_indices.size > 0:
+        water_values[permanent_indices] = np.maximum(
+            water_values[permanent_indices], state.base_water[permanent_indices]
+        )
+        state.flood_active.update(
+            permanent_indices[
+                water_values[permanent_indices]
+                > state.bankfull_level[permanent_indices]
+            ]
+        )
 
-        state.soil_water[index] = max(
+    soil_indices: IntGrid = indices[~state.permanent_water[indices]]
+    if soil_indices.size > 0:
+        state.soil_water[soil_indices] = np.maximum(
             0.0,
-            state.soil_water[index] - state.soil_drainage[index],
+            state.soil_water[soil_indices] - state.soil_drainage[soil_indices],
         )
-        state.wetness[index] = max(0.0, state.wetness[index] - config.wetness_decay)
-        if index in state.fluid_active or index in state.flood_active:
-            continue
-
-        if 0.0 < water[index] <= config.shallow_water_threshold:
-            water[index] = max(0.0, water[index] - config.shallow_evaporation)
-
-
-def _move_downhill_or_sideways(
-    *,
-    index: int,
-    water: list[float],
-    height_map: list[float],
-    state: WaterSystemState,
-    config: SimConfig,
-    delta: dict[int, float],
-    next_active: set[int],
-) -> bool:
-    current_surface: float = (
-        height_map[index] + water[index] * config.water_height_scale
-    )
-    best_downhill: int = -1
-    best_downhill_surface: float = current_surface
-    for neighbor_index in state.neighbors4[index]:
-        neighbor_surface: float = (
-            height_map[neighbor_index]
-            + water[neighbor_index] * config.water_height_scale
+        state.wetness[soil_indices] = np.maximum(
+            0.0, state.wetness[soil_indices] - config.wetness_decay
         )
-        if (
-            height_map[neighbor_index] < height_map[index]
-            and neighbor_surface < best_downhill_surface
-        ):
-            best_downhill = neighbor_index
-            best_downhill_surface = neighbor_surface
-
-    if best_downhill >= 0:
-        height_drop: float = current_surface - best_downhill_surface
-        flow: float = min(
-            water[index] - state.base_water[index],
-            water[index]
-            * config.downhill_flow_fraction
-            * max(0.20, height_drop * 12.0),
+        inactive_mask: BoolGrid = (
+            ~state.fluid_active.mask[soil_indices]
+            & ~state.flood_active.mask[soil_indices]
         )
-        if flow > 0.0:
-            _add_delta(delta, index, -flow)
-            _add_delta(delta, best_downhill, flow)
-            next_active.add(index)
-            next_active.add(best_downhill)
-            return True
-
-    best_spread: int = -1
-    best_surface: float = current_surface
-    for neighbor_index in state.neighbors4[index]:
-        if height_map[neighbor_index] > height_map[index] + config.sideways_height_slop:
-            continue
-        spread_surface: float = (
-            height_map[neighbor_index]
-            + water[neighbor_index] * config.water_height_scale
-        )
-        if spread_surface < best_surface:
-            best_spread = neighbor_index
-            best_surface = spread_surface
-
-    if best_spread < 0:
-        return False
-
-    depth_difference: float = water[index] - water[best_spread]
-    if depth_difference <= config.sideways_min_depth_difference:
-        return False
-
-    spread: float = min(
-        water[index] - state.base_water[index],
-        depth_difference * config.sideways_spread_fraction,
-    )
-    if spread <= 0.0:
-        return False
-
-    _add_delta(delta, index, -spread)
-    _add_delta(delta, best_spread, spread)
-    next_active.add(index)
-    next_active.add(best_spread)
-    return True
-
-
-def _spill_floodwater(
-    *,
-    index: int,
-    water: list[float],
-    height_map: list[float],
-    state: WaterSystemState,
-    config: SimConfig,
-    delta: dict[int, float],
-    next_active: set[int],
-) -> None:
-    excess: float = water[index] - state.bankfull_level[index]
-    if excess <= 0.0:
-        return
-
-    target_index: int = -1
-    target_height: float = 999_999.0
-    source_height: float = height_map[index]
-    for neighbor_index in state.neighbors4[index]:
-        if state.permanent_water[neighbor_index]:
-            continue
-        neighbor_height: float = height_map[neighbor_index]
-        if neighbor_height <= source_height and neighbor_height < target_height:
-            target_index = neighbor_index
-            target_height = neighbor_height
-
-    if target_index < 0:
-        drain: float = min(excess, config.off_map_drain_rate)
-        _add_delta(delta, index, -drain)
-        next_active.add(index)
-        return
-
-    spill: float = excess * config.flood_spill_fraction
-    _add_delta(delta, index, -spill)
-    _add_delta(delta, target_index, spill)
-    next_active.add(index)
-    next_active.add(target_index)
-
-
-def _infiltrate_surface_water(
-    *,
-    index: int,
-    water: list[float],
-    state: WaterSystemState,
-    config: SimConfig,
-    next_active: set[int],
-) -> None:
-    if state.permanent_water[index]:
-        return
-
-    soil_room: float = max(0.0, state.soil_capacity[index] - state.soil_water[index])
-    absorbed: float = min(soil_room, config.surface_infiltration_per_fluid_tick)
-    if absorbed > 0.0:
-        state.soil_water[index] += absorbed
-        water[index] = max(0.0, water[index] - absorbed)
-    if water[index] >= config.surface_water_active_threshold:
-        next_active.add(index)
-
-
-def _restore_base_water(
-    index: int, water: list[float], state: WaterSystemState
-) -> None:
-    if water[index] < state.base_water[index]:
-        water[index] = state.base_water[index]
-
-
-def _add_delta(delta: dict[int, float], index: int, change: float) -> None:
-    delta[index] = delta.get(index, 0.0) + change
-
-
-def _neighbors4(width: int, height: int, index: int) -> tuple[int, ...]:
-    x: int = index % width
-    y: int = index // width
-    neighbors: list[int] = []
-    if y > 0:
-        neighbors.append(index - width)
-    if x > 0:
-        neighbors.append(index - 1)
-    if x < width - 1:
-        neighbors.append(index + 1)
-    if y < height - 1:
-        neighbors.append(index + width)
-    return tuple(neighbors)
-
-
-def _soil_capacity_for(terrain_kind: TerrainKind) -> float:
-    if terrain_kind is TerrainKind.WATER:
-        return 0.0
-    if terrain_kind is TerrainKind.ROCK:
-        return 0.10
-    if terrain_kind is TerrainKind.HILL:
-        return 0.45
-    if terrain_kind is TerrainKind.FOREST:
-        return 0.90
-    return 0.70
-
-
-def _soil_drainage_for(terrain_kind: TerrainKind) -> float:
-    if terrain_kind is TerrainKind.WATER:
-        return 0.0
-    if terrain_kind is TerrainKind.ROCK:
-        return 0.01
-    if terrain_kind is TerrainKind.HILL:
-        return 0.06
-    if terrain_kind is TerrainKind.FOREST:
-        return 0.04
-    return 0.05
-
-
-def _infiltration_for(terrain_kind: TerrainKind) -> float:
-    if terrain_kind is TerrainKind.WATER:
-        return 0.0
-    if terrain_kind is TerrainKind.ROCK:
-        return 0.10
-    if terrain_kind is TerrainKind.HILL:
-        return 0.35
-    if terrain_kind is TerrainKind.FOREST:
-        return 0.75
-    return 0.60
-
-
-def _runoff_for(terrain_kind: TerrainKind) -> float:
-    if terrain_kind is TerrainKind.WATER:
-        return 1.00
-    if terrain_kind is TerrainKind.ROCK:
-        return 0.90
-    if terrain_kind is TerrainKind.HILL:
-        return 0.60
-    if terrain_kind is TerrainKind.FOREST:
-        return 0.20
-    return 0.35
-
-
-def _is_non_water_catchment(terrain_kind: TerrainKind) -> bool:
-    return terrain_kind is TerrainKind.HILL
+        evaporation_indices: IntGrid = soil_indices[
+            inactive_mask
+            & (water_values[soil_indices] > 0.0)
+            & (water_values[soil_indices] <= config.shallow_water_threshold)
+        ]
+        if evaporation_indices.size > 0:
+            water_values[evaporation_indices] = np.maximum(
+                0.0, water_values[evaporation_indices] - config.shallow_evaporation
+            )
+    _sync_float_grid(water, water_values)

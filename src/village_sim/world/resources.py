@@ -4,27 +4,32 @@ from __future__ import annotations
 
 import random
 
+import numpy as np
+from numpy.typing import NDArray
+
 from village_sim.core.config import SimConfig
 from village_sim.core.types import TerrainKind
 from village_sim.world.grid import index_of, iter_neighbor_positions, iter_positions
 
+FloatGrid = NDArray[np.float64]
+IntGrid = NDArray[np.int64]
+TerrainGrid = list[int] | IntGrid
+MutableFloatGrid = list[float] | FloatGrid
 
-def initialize_water(terrain: list[int]) -> list[float]:
+
+def initialize_water(terrain: TerrainGrid) -> FloatGrid:
     """Create initial water levels from terrain classes."""
 
-    water: list[float] = []
-    for terrain_value in terrain:
-        if TerrainKind(terrain_value) is TerrainKind.WATER:
-            water.append(1.0)
-        else:
-            water.append(0.0)
-    return water
+    terrain_values: IntGrid = np.asarray(terrain, dtype=np.int64)
+    return np.where(terrain_values == int(TerrainKind.WATER), 1.0, 0.0).astype(
+        np.float64
+    )
 
 
 def initialize_food(
     width: int,
     height: int,
-    terrain: list[int],
+    terrain: TerrainGrid,
     rng: random.Random,
 ) -> tuple[list[float], list[float]]:
     """Place food in plausible forest/grass-edge cells.
@@ -72,15 +77,20 @@ def initialize_food(
 def regrow_food(
     width: int,
     height: int,
-    food: list[float],
-    food_capacity: list[float],
+    food: MutableFloatGrid,
+    food_capacity: MutableFloatGrid,
     config: SimConfig,
 ) -> None:
     """Regrow a small amount of food on established food patches."""
 
     del width, height
 
-    for index, capacity in enumerate(food_capacity):
-        if capacity <= 0.0:
-            continue
-        food[index] = min(capacity, food[index] + config.food_regrowth_per_tick)
+    food_values: FloatGrid = np.asarray(food, dtype=np.float64)
+    capacity_values: FloatGrid = np.asarray(food_capacity, dtype=np.float64)
+    active_mask: NDArray[np.bool_] = capacity_values > 0.0
+    food_values[active_mask] = np.minimum(
+        capacity_values[active_mask],
+        food_values[active_mask] + config.food_regrowth_per_tick,
+    )
+    if not isinstance(food, np.ndarray):
+        food[:] = food_values.astype(np.float64, copy=False).tolist()

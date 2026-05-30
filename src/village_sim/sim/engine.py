@@ -6,13 +6,20 @@ import random
 from dataclasses import dataclass, field
 from time import perf_counter
 
+import polars as pl
+
 from village_sim.agent.decision import DecisionSource
 from village_sim.agent.memory import (
     AgentMemory,
     DiscoverableAgentMemory,
     ResourceMemory,
 )
-from village_sim.agent.needs import update_needs
+from village_sim.agent.needs import (
+    agent_frame_from_states,
+    sync_agent_from_frame,
+    sync_agent_to_frame,
+    update_needs_frame,
+)
 from village_sim.agent.perception import Observation, perceive
 from village_sim.agent.policy import choose_and_execute_action
 from village_sim.agent.state import AgentState, MemoryMarker
@@ -84,6 +91,7 @@ class Simulation:
     rng: random.Random = field(init=False)
     world: World = field(init=False)
     agent: AgentState = field(init=False)
+    agent_frame: pl.DataFrame = field(init=False)
     memory: AgentMemory = field(init=False)
     discoverable_memory: DiscoverableAgentMemory = field(init=False)
     orchestrator: Orchestrator = field(init=False)
@@ -122,7 +130,8 @@ class Simulation:
         spawn_position = choose_spawn_position(self.world, self.rng)
         self.agent = AgentState(agent_id=1, position=spawn_position)
         self.agent.ensure_visit_buffer(self.world.width * self.world.height)
-        self.memory = AgentMemory()
+        self.agent_frame = agent_frame_from_states([self.agent])
+        self.memory = AgentMemory(agent_id=self.agent.agent_id)
         self.discoverable_memory = DiscoverableAgentMemory()
         self.orchestrator = Orchestrator()
         self.action_library = ActionLibrary()
@@ -134,6 +143,31 @@ class Simulation:
         )
         self._log("spawn", "agent spawned")
         self._log_weather_transition(self.current_weather)
+
+    def _sync_agent_cache_to_frame(self) -> None:
+        self.agent_frame = sync_agent_to_frame(self.agent_frame, self.agent)
+
+    def _sync_agent_cache_from_frame(self) -> None:
+        sync_agent_from_frame(self.agent_frame, self.agent)
+
+    def _update_agent_needs(
+        self,
+        *,
+        is_night: bool = False,
+        is_raining: bool = False,
+        is_sheltered: bool = False,
+        is_cold_exposed: bool | None = None,
+    ) -> None:
+        self._sync_agent_cache_to_frame()
+        self.agent_frame = update_needs_frame(
+            self.agent_frame,
+            self.config,
+            is_night=is_night,
+            is_raining=is_raining,
+            is_sheltered=is_sheltered,
+            is_cold_exposed=is_cold_exposed,
+        )
+        self._sync_agent_cache_from_frame()
 
     def step(self) -> None:
         if self.tick >= self.config.max_ticks():
@@ -362,9 +396,7 @@ class Simulation:
             clock, observation
         )
         if interaction_ticks > 0:
-            update_needs(
-                self.agent,
-                self.config,
+            self._update_agent_needs(
                 is_night=clock.is_night,
                 is_raining=weather.is_raining,
                 is_sheltered=self.agent_is_sheltered(),
@@ -399,9 +431,7 @@ class Simulation:
         ):
             self._log("action", action_message)
 
-        update_needs(
-            self.agent,
-            self.config,
+        self._update_agent_needs(
             is_night=clock.is_night,
             is_raining=weather.is_raining,
             is_sheltered=self.agent_is_sheltered(),
@@ -530,9 +560,7 @@ class Simulation:
                 self._log("weather", "rain fell")
             self._log_weather_transition(weather)
             self._record_timing("environment", perf_counter() - environment_start)
-            update_needs(
-                self.agent,
-                self.config,
+            self._update_agent_needs(
                 is_night=busy_clock.is_night,
                 is_raining=weather.is_raining,
                 is_sheltered=self.agent_is_sheltered(),
