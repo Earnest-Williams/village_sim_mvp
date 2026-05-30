@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import random
-from typing import List, Tuple, Any
-
 import numpy as np
 from numpy.typing import NDArray
 
@@ -18,6 +16,7 @@ from village_sim.agent.actions import (
 )
 from village_sim.agent.decision import DecisionSource, DecisionTrace
 from village_sim.agent.memory import AgentMemory, ResourceMemory
+from village_sim.agent.perception import Observation
 from village_sim.agent.state import AgentState
 from village_sim.core.config import SimConfig
 from village_sim.core.time import SimClock
@@ -41,24 +40,73 @@ def choose_goal(agent: AgentState, clock: SimClock) -> GoalKind:
 def choose_and_execute_action(
     agent: AgentState,
     memory: AgentMemory,
-    visible_water_indices: NDArray[np.int64],
-    visible_food_indices: NDArray[np.int64],
-    world: World,
-    clock: SimClock,
-    rng: random.Random,
-    config: SimConfig,
+    visible_water_indices: NDArray[np.int64] | Observation,
+    visible_food_indices: NDArray[np.int64] | World,
+    world: World | SimClock,
+    clock: SimClock | random.Random,
+    rng: random.Random | SimConfig,
+    config: SimConfig | None = None,
 ) -> str:
     """Resolve a goal to a concrete action and execute it over pure index arrays."""
+
+    if isinstance(visible_water_indices, Observation):
+        actual_world, actual_clock, actual_rng, actual_config = _legacy_args(
+            visible_food_indices,
+            world,
+            clock,
+            rng,
+            config,
+        )
+        actual_visible_water_indices: NDArray[np.int64] = _observation_indices(
+            visible_water_indices,
+            ResourceKind.WATER,
+            actual_world.width,
+        )
+        actual_visible_food_indices: NDArray[np.int64] = _observation_indices(
+            visible_water_indices,
+            ResourceKind.FOOD,
+            actual_world.width,
+        )
+    else:
+        if not isinstance(visible_food_indices, np.ndarray):
+            raise TypeError("visible_food_indices must be an ndarray")
+        if not isinstance(world, World):
+            raise TypeError("world must be a World")
+        if not isinstance(clock, SimClock):
+            raise TypeError("clock must be a SimClock")
+        if not isinstance(rng, random.Random):
+            raise TypeError("rng must be a Random")
+        if config is None:
+            raise TypeError("config is required")
+        actual_visible_water_indices = visible_water_indices
+        actual_visible_food_indices = visible_food_indices
+        actual_world = world
+        actual_clock = clock
+        actual_rng = rng
+        actual_config = config
+
     agent.decision_trace = DecisionTrace()
-    agent.current_goal = choose_goal(agent, clock)
+    agent.current_goal = choose_goal(agent, actual_clock)
 
     if agent.current_goal is GoalKind.GET_WATER:
         return _resolve_water_goal(
-            agent, memory, visible_water_indices, world, clock.tick, rng, config
+            agent,
+            memory,
+            actual_visible_water_indices,
+            actual_world,
+            actual_clock.tick,
+            actual_rng,
+            actual_config,
         )
     if agent.current_goal is GoalKind.GET_FOOD:
         return _resolve_food_goal(
-            agent, memory, visible_food_indices, world, clock.tick, rng, config
+            agent,
+            memory,
+            actual_visible_food_indices,
+            actual_world,
+            actual_clock.tick,
+            actual_rng,
+            actual_config,
         )
     if agent.current_goal is GoalKind.SLEEP:
         return execute_sleep(agent)
@@ -67,8 +115,54 @@ def choose_and_execute_action(
             source=DecisionSource.EXPLORE,
             reason="general exploration",
         )
-        return execute_explore(agent, world, rng)
+        return execute_explore(agent, actual_world, actual_rng)
     return "idled"
+
+
+def _legacy_args(
+    visible_food_indices: NDArray[np.int64] | World,
+    world: World | SimClock,
+    clock: SimClock | random.Random,
+    rng: random.Random | SimConfig,
+    config: SimConfig | None,
+) -> tuple[World, SimClock, random.Random, SimConfig]:
+    if not isinstance(visible_food_indices, World):
+        raise TypeError("legacy world argument must be a World")
+    if not isinstance(world, SimClock):
+        raise TypeError("legacy clock argument must be a SimClock")
+    if not isinstance(clock, random.Random):
+        raise TypeError("legacy rng argument must be a Random")
+    if not isinstance(rng, SimConfig):
+        raise TypeError("legacy config argument must be a SimConfig")
+    if config is not None:
+        raise TypeError("unexpected extra config argument")
+    return visible_food_indices, world, clock, rng
+
+
+def _observation_indices(
+    observation: Observation,
+    kind: ResourceKind,
+    width: int,
+) -> NDArray[np.int64]:
+    if kind is ResourceKind.WATER:
+        if observation.visible_water_indices.size > 0:
+            return observation.visible_water_indices
+        return np.asarray(
+            [
+                item.position.y * width + item.position.x
+                for item in observation.visible_water
+            ],
+            dtype=np.int64,
+        )
+    if observation.visible_food_indices.size > 0:
+        return observation.visible_food_indices
+    return np.asarray(
+        [
+            item.position.y * width + item.position.x
+            for item in observation.visible_food
+        ],
+        dtype=np.int64,
+    )
 
 
 def _resolve_water_goal(
@@ -270,12 +364,14 @@ def _closest_visible_idx(
     indices: NDArray[np.int64],
     width: int,
 ) -> int:
-    """Find the nearest tile index using purely vectorized Euclidean distance."""
+    """Find the nearest tile index using vectorized squared distance."""
     if indices.size == 0:
         return -1
 
     xs: NDArray[np.int64] = indices % width
     ys: NDArray[np.int64] = indices // width
-    distances: NDArray[np.float64] = np.sqrt((xs - agent_x) ** 2 + (ys - agent_y) ** 2)
-    best_loc: int = int(np.argmin(distances))
+    dx: NDArray[np.int64] = xs - agent_x
+    dy: NDArray[np.int64] = ys - agent_y
+    squared_distances: NDArray[np.int64] = dx * dx + dy * dy
+    best_loc: int = int(np.argmin(squared_distances))
     return int(indices[best_loc])
