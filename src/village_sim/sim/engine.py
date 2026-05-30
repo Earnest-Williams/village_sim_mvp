@@ -171,6 +171,12 @@ class Simulation:
 
     def __post_init__(self) -> None:
         self.config.validate()
+        if self.config.initial_agents > self.max_agents:
+            raise ValueError(
+                "initial_agents "
+                f"({self.config.initial_agents}) must be less than or equal to "
+                f"max_agents ({self.max_agents})"
+            )
         self.rng = random.Random(self.config.seed)
         initial_discoverables: dict[str, Discoverable] | None = None
         if self.config.enable_initial_discoverables:
@@ -212,6 +218,8 @@ class Simulation:
         self._init_perception_buffers()
         validate_arrays_match_dataclasses(self.agents, [self.agent])
         self._log("spawn", "agent spawned")
+        if self.config.initial_agents > 1:
+            self.spawn_settlers(self.config.initial_agents - 1, self.tick)
         self._log_weather_transition(self.current_weather)
 
     def _init_perception_buffers(self) -> None:
@@ -466,6 +474,8 @@ class Simulation:
             distance_walked=self.agent.distance_walked,
             remembered_water_sites=remembered_water_sites,
             remembered_food_sites=remembered_food_sites,
+            initial_agents=self.config.initial_agents,
+            final_active_agents=int(np.count_nonzero(self.agents.active)),
             learning=self.learning,
             best_water_memory_x=-1 if best_water is None else best_water.position.x,
             best_water_memory_y=-1 if best_water is None else best_water.position.y,
@@ -1046,9 +1056,7 @@ class Simulation:
             reason = self.agent.death_reason.value
         self._log("death", f"agent died from {reason}")
 
-    def _log_newly_dead_agents(
-        self, initial_active_mask: NDArray[np.bool_]
-    ) -> None:
+    def _log_newly_dead_agents(self, initial_active_mask: NDArray[np.bool_]) -> None:
         newly_dead_mask: NDArray[np.bool_] = initial_active_mask & ~self.agents.active
         for idx in np.flatnonzero(newly_dead_mask):
             index = int(idx)

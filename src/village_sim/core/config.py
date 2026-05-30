@@ -14,6 +14,7 @@ class SimConfig:
     max_days: int = 10
     ticks_per_day: int = 144
     seed: int = 1
+    initial_agents: int = 1
     tile_size_meters: float = 2.0
     enable_initial_discoverables: bool = False
     enable_goap_control: bool = False
@@ -87,6 +88,8 @@ class SimConfig:
             raise ValueError("tile_size_meters must be positive")
         if self.max_days < 1:
             raise ValueError("max_days must be at least 1")
+        if self.initial_agents < 1:
+            raise ValueError("initial_agents must be at least 1")
         if self.ticks_per_day < 24:
             raise ValueError("ticks_per_day must be at least 24")
         if not 0 <= self.day_start_tick < self.ticks_per_day:

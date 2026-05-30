@@ -22,13 +22,14 @@ def write_run_report(
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "config": {
             "width": config.width,
             "height": config.height,
             "max_days": config.max_days,
             "ticks_per_day": config.ticks_per_day,
             "seed": config.seed,
+            "initial_agents": config.initial_agents,
             "day_temperature_c": config.day_temperature_c,
             "night_temperature_c": config.night_temperature_c,
             "rain_temperature_penalty_c": config.rain_temperature_penalty_c,
