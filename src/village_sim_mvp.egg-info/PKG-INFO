@@ -7,6 +7,7 @@ License: MIT
 Requires-Python: >=3.12
 Description-Content-Type: text/markdown
 Requires-Dist: msgpack>=1.0
+Requires-Dist: numba>=0.62
 Requires-Dist: numpy>=2.4
 Requires-Dist: polars>=1.41
 Provides-Extra: gui
