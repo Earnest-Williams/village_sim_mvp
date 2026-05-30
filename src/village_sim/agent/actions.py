@@ -4,22 +4,18 @@ from __future__ import annotations
 
 import random
 from collections import deque
+from typing import List, Dict, Tuple, Any
 
 from village_sim.agent.memory import AgentMemory, ResourceMemory
 from village_sim.agent.state import AgentState
 from village_sim.core.config import SimConfig
 from village_sim.core.types import (
     ActionKind,
-    MoveCandidate,
     Position,
     ResourceKind,
     TerrainKind,
 )
-from village_sim.world.grid import (
-    index_of,
-    iter_neighbor_positions,
-    iter_positions_in_radius,
-)
+from village_sim.world.grid import index_of
 from village_sim.world.world import World
 
 
@@ -132,29 +128,36 @@ def execute_search_near(
     if agent.position.manhattan_to(memory.position) > max(2, memory.search_radius):
         return execute_move_toward(agent, world, memory.position, rng)
 
-    candidates: list[Position] = []
-    for position in iter_positions_in_radius(
-        world.width,
-        world.height,
-        memory.position,
-        memory.search_radius,
-    ):
-        if world.is_passable(position):
-            candidates.append(position)
-    if not candidates:
-        return execute_explore(agent, world, rng)
-
     best_position: Position | None = None
     best_score: float = -1_000_000.0
-    for position in candidates:
-        visit_count: int = agent.visited_counts[index_of(world.width, position)]
-        distance: int = agent.position.manhattan_to(position)
-        score: float = (
-            -float(visit_count) * 0.55 - float(distance) * 0.12 + rng.random() * 0.15
-        )
-        if score > best_score:
-            best_score = score
-            best_position = position
+
+    mx: int = memory.position.x
+    my: int = memory.position.y
+    rad: int = memory.search_radius
+
+    min_x: int = max(0, mx - rad)
+    max_x: int = min(world.width - 1, mx + rad)
+    min_y: int = max(0, my - rad)
+    max_y: int = min(world.height - 1, my + rad)
+
+    for y in range(min_y, max_y + 1):
+        y_dist: int = abs(y - my)
+        x_rad: int = rad - y_dist
+        min_x_row: int = max(0, mx - x_rad)
+        max_x_row: int = min(world.width - 1, mx + x_rad)
+        for x in range(min_x_row, max_x_row + 1):
+            idx: int = y * world.width + x
+            if world.terrain[idx] == int(TerrainKind.ROCK):
+                continue
+
+            visit_count: int = agent.visited_counts[idx]
+            distance: int = abs(agent.position.x - x) + abs(agent.position.y - y)
+            score: float = (
+                -float(visit_count) * 0.55 - float(distance) * 0.12 + rng.random() * 0.15
+            )
+            if score > best_score:
+                best_score = score
+                best_position = Position(x=x, y=y)
 
     if best_position is None:
         return execute_explore(agent, world, rng)
@@ -167,12 +170,7 @@ def choose_step_toward(
     target: Position,
     rng: random.Random,
 ) -> Position | None:
-    """Choose one step using a small A* search.
-
-    This is intentionally still simple and portable. It prevents the MVP agent from
-    getting trapped by rocks while trying to walk greedily toward water or food.
-    """
-
+    """Choose one step using a small search over integer grids."""
     if agent.position == target:
         agent.path = []
         return agent.position
@@ -187,7 +185,7 @@ def choose_step_toward(
     if reachable_target is None:
         return _choose_greedy_step(agent, world, target, rng)
 
-    path: list[Position] | None = _find_path(world, agent.position, reachable_target)
+    path: List[Position] | None = _find_path(world, agent.position, reachable_target)
     if path is not None and len(path) >= 2:
         agent.path = path[1:]
         return path[1]
@@ -197,63 +195,99 @@ def choose_step_toward(
 
 
 def _reachable_target(world: World, target: Position) -> Position | None:
-    if world.in_bounds(target) and world.is_passable(target):
+    tx: int = target.x
+    ty: int = target.y
+    width: int = world.width
+    height: int = world.height
+    t_idx: int = ty * width + tx
+
+    if 0 <= tx < width and 0 <= ty < height and world.terrain[t_idx] != int(TerrainKind.ROCK):
         return target
-    best: Position | None = None
-    best_distance: float = 1_000_000.0
-    for neighbor in iter_neighbor_positions(world.width, world.height, target, False):
-        if not world.is_passable(neighbor):
+
+    best_idx: int = -1
+    best_dist: float = 1_000_000.0
+
+    neighbors: List[int] = []
+    if ty > 0:
+        neighbors.append(t_idx - width)
+    if ty < height - 1:
+        neighbors.append(t_idx + width)
+    if tx > 0:
+        neighbors.append(t_idx - 1)
+    if tx < width - 1:
+        neighbors.append(t_idx + 1)
+
+    for n_idx in neighbors:
+        if world.terrain[n_idx] == int(TerrainKind.ROCK):
             continue
-        distance: float = neighbor.distance_to(target)
-        if distance < best_distance:
-            best_distance = distance
-            best = neighbor
-    return best
+        nx: int = n_idx % width
+        ny: int = n_idx // width
+        dist: float = ((nx - tx) ** 2 + (ny - ty) ** 2) ** 0.5
+        if dist < best_dist:
+            best_dist = dist
+            best_idx = n_idx
+
+    if best_idx == -1:
+        return None
+    return Position(x=best_idx % width, y=best_idx // width)
 
 
 def _find_path(
     world: World, start: Position, target: Position
-) -> list[Position] | None:
+) -> List[Position] | None:
     """Find an unweighted passable-grid path with bounded breadth-first search."""
+    width: int = world.width
+    height: int = world.height
+    start_idx: int = start.y * width + start.x
+    target_idx: int = target.y * width + target.x
 
-    frontier: deque[Position] = deque([start])
-    came_from: dict[Position, Position | None] = {start: None}
+    frontier: deque[int] = deque([start_idx])
+    came_from: Dict[int, int] = {start_idx: start_idx}
     expansions: int = 0
-    max_expansions: int = min(world.width * world.height, 2_000)
+    max_expansions: int = min(width * height, 2_000)
 
     while frontier and expansions < max_expansions:
-        current: Position = frontier.popleft()
+        current_idx: int = frontier.popleft()
         expansions += 1
-        if current == target:
-            return _reconstruct_path(came_from, current)
+        if current_idx == target_idx:
+            return _reconstruct_path(came_from, current_idx, start_idx, width)
 
-        neighbors: list[Position] = list(
-            iter_neighbor_positions(world.width, world.height, current, False)
-        )
-        neighbors.sort(key=lambda candidate: candidate.distance_to(target))
-        for neighbor in neighbors:
-            if neighbor in came_from:
+        cx: int = current_idx % width
+        cy: int = current_idx // width
+
+        neighbors: List[int] = []
+        if cy > 0:
+            neighbors.append(current_idx - width)
+        if cy < height - 1:
+            neighbors.append(current_idx + width)
+        if cx > 0:
+            neighbors.append(current_idx - 1)
+        if cx < width - 1:
+            neighbors.append(current_idx + 1)
+
+        for n_idx in neighbors:
+            if n_idx in came_from:
                 continue
-            if not world.is_passable(neighbor):
+            if world.terrain[n_idx] == int(TerrainKind.ROCK):
                 continue
-            came_from[neighbor] = current
-            frontier.append(neighbor)
+            came_from[n_idx] = current_idx
+            frontier.append(n_idx)
 
     return None
 
 
 def _reconstruct_path(
-    came_from: dict[Position, Position | None],
-    current: Position,
-) -> list[Position]:
-    path: list[Position] = [current]
-    while came_from[current] is not None:
-        previous: Position | None = came_from[current]
-        assert previous is not None
-        current = previous
-        path.append(current)
-    path.reverse()
-    return path
+    came_from: Dict[int, int],
+    current_idx: int,
+    start_idx: int,
+    width: int,
+) -> List[Position]:
+    path_indices: List[int] = [current_idx]
+    while current_idx != start_idx:
+        current_idx = came_from[current_idx]
+        path_indices.append(current_idx)
+    path_indices.reverse()
+    return [Position(x=idx % width, y=idx // width) for idx in path_indices]
 
 
 def _choose_greedy_step(
@@ -262,27 +296,49 @@ def _choose_greedy_step(
     target: Position,
     rng: random.Random,
 ) -> Position | None:
-    candidates: list[MoveCandidate] = []
+    cx: int = agent.position.x
+    cy: int = agent.position.y
+    width: int = world.width
+    height: int = world.height
+    current_idx: int = cy * width + cx
+
     current_distance: float = agent.position.distance_to(target)
-    current_height: float = world.height_at(agent.position)
-    for neighbor in iter_neighbor_positions(
-        world.width, world.height, agent.position, False
-    ):
-        if not world.is_passable(neighbor):
+    current_height: float = float(world.height_map[current_idx])
+
+    best_idx: int = -1
+    best_score: float = -1_000_000.0
+
+    neighbors: List[int] = []
+    if cy > 0:
+        neighbors.append(current_idx - width)
+    if cy < height - 1:
+        neighbors.append(current_idx + width)
+    if cx > 0:
+        neighbors.append(current_idx - 1)
+    if cx < width - 1:
+        neighbors.append(current_idx + 1)
+
+    for n_idx in neighbors:
+        if world.terrain[n_idx] == int(TerrainKind.ROCK):
             continue
-        distance: float = neighbor.distance_to(target)
-        cost: float = world.movement_cost(neighbor)
-        height_delta: float = max(0.0, world.height_at(neighbor) - current_height)
+        nx: int = n_idx % width
+        ny: int = n_idx // width
+        dist: float = ((nx - target.x) ** 2 + (ny - target.y) ** 2) ** 0.5
+        cost: float = float(world.movement_costs[n_idx])
+        h_delta: float = max(0.0, float(world.height_map[n_idx]) - current_height)
+
         score: float = (
-            (current_distance - distance) * 4.0 - cost * 0.35 - height_delta * 1.6
+            (current_distance - dist) * 4.0 - cost * 0.35 - h_delta * 1.6
         )
         score += rng.random() * 0.03
-        candidates.append(MoveCandidate(position=neighbor, score=score))
 
-    if not candidates:
+        if score > best_score:
+            best_score = score
+            best_idx = n_idx
+
+    if best_idx == -1:
         return None
-    candidates.sort(key=lambda candidate: candidate.score, reverse=True)
-    return candidates[0].position
+    return Position(x=best_idx % width, y=best_idx // width)
 
 
 def choose_exploration_step(
@@ -290,32 +346,52 @@ def choose_exploration_step(
     world: World,
     rng: random.Random,
 ) -> Position | None:
-    candidates: list[MoveCandidate] = []
-    current_height: float = world.height_at(agent.position)
-    for neighbor in iter_neighbor_positions(
-        world.width, world.height, agent.position, False
-    ):
-        if not world.is_passable(neighbor):
+    cx: int = agent.position.x
+    cy: int = agent.position.y
+    width: int = world.width
+    height: int = world.height
+    current_idx: int = cy * width + cx
+    current_height: float = float(world.height_map[current_idx])
+
+    best_idx: int = -1
+    best_score: float = -1_000_000.0
+
+    neighbors: List[int] = []
+    if cy > 0:
+        neighbors.append(current_idx - width)
+    if cy < height - 1:
+        neighbors.append(current_idx + width)
+    if cx > 0:
+        neighbors.append(current_idx - 1)
+    if cx < width - 1:
+        neighbors.append(current_idx + 1)
+
+    for n_idx in neighbors:
+        kind_val: int = int(world.terrain[n_idx])
+        if kind_val == int(TerrainKind.ROCK):
             continue
-        index: int = index_of(world.width, neighbor)
-        visit_count: int = agent.visited_counts[index]
-        kind: TerrainKind = world.terrain_at(neighbor)
+
+        visit_count: int = agent.visited_counts[n_idx]
         terrain_bonus: float = 0.0
-        if agent.thirst > 0.55 and world.height_at(neighbor) < current_height:
+
+        if agent.thirst > 0.55 and float(world.height_map[n_idx]) < current_height:
             terrain_bonus += 0.45
-        if agent.hunger > 0.45 and kind is TerrainKind.FOREST:
+        if agent.hunger > 0.45 and kind_val == int(TerrainKind.FOREST):
             terrain_bonus += 0.28
-        if kind is TerrainKind.WATER:
+        if kind_val == int(TerrainKind.WATER):
             terrain_bonus += 0.18
+
         score: float = (
             terrain_bonus
             - float(visit_count) * 0.30
-            - world.movement_cost(neighbor) * 0.08
+            - float(world.movement_costs[n_idx]) * 0.08
         )
         score += rng.random() * 0.20
-        candidates.append(MoveCandidate(position=neighbor, score=score))
 
-    if not candidates:
+        if score > best_score:
+            best_score = score
+            best_idx = n_idx
+
+    if best_idx == -1:
         return None
-    candidates.sort(key=lambda candidate: candidate.score, reverse=True)
-    return candidates[0].position
+    return Position(x=best_idx % width, y=best_idx // width)
