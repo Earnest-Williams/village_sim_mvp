@@ -112,8 +112,6 @@ def make_agent_arrays(capacity: int = MAX_AGENTS) -> AgentArrays:
 
     if capacity <= 0:
         raise ValueError("agent array capacity must be positive")
-    if capacity > MAX_AGENTS:
-        raise ValueError("agent array capacity exceeds MAX_AGENTS")
     return AgentArrays(
         count=capacity,
         active=np.zeros(capacity, dtype=np.bool_),
