@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
+from typing import List, Dict, Tuple, Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -25,6 +26,7 @@ from village_sim.world.water_system import (
 from village_sim.world.terrain import (
     carve_stream,
     classify_terrain,
+    compute_all_movement_costs,
     estimate_slope,
     generate_height_map,
     walk_cost,
@@ -53,6 +55,9 @@ class World:
     water: list[float] | FloatGrid
     food: list[float] | FloatGrid
     food_capacity: list[float] | FloatGrid
+    movement_costs: list[float] | FloatGrid = field(
+        default_factory=lambda: np.empty(0, dtype=np.float64)
+    )
     water_system: WaterSystemState = field(init=False)
     rain_system: RainSystem = field(default_factory=RainSystem)
     discoverables: dict[str, Discoverable] = field(default_factory=_new_discoverables)
@@ -66,6 +71,10 @@ class World:
             terrain=self.terrain,
             water=self.water,
         )
+        if len(self.movement_costs) == 0 and self.width > 0 and self.height > 0:
+            self.movement_costs = compute_all_movement_costs(
+                self.width, self.height, self.height_map, self.terrain
+            )
 
     def index(self, position: Position) -> int:
         return index_of(self.width, position)
@@ -77,17 +86,17 @@ class World:
         return TerrainKind(self.terrain[self.index(position)])
 
     def height_at(self, position: Position) -> float:
-        return self.height_map[self.index(position)]
+        return float(self.height_map[self.index(position)])
 
     def water_at(self, position: Position) -> float:
-        return self.water[self.index(position)]
+        return float(self.water[self.index(position)])
 
     def food_at(self, position: Position) -> float:
-        return self.food[self.index(position)]
+        return float(self.food[self.index(position)])
 
     def consume_water(self, position: Position, amount: float) -> float:
         index: int = self.index(position)
-        available: float = self.water[index]
+        available: float = float(self.water[index])
         consumed: float = min(available, amount)
         if TerrainKind(self.terrain[index]) is TerrainKind.WATER:
             # Permanent water terrain can be drunk from without fully draining.
@@ -98,8 +107,8 @@ class World:
 
     def consume_food(self, position: Position, amount: float) -> float:
         index: int = self.index(position)
-        consumed: float = min(self.food[index], amount)
-        self.food[index] = max(0.0, self.food[index] - consumed)
+        consumed: float = min(float(self.food[index]), amount)
+        self.food[index] = max(0.0, float(self.food[index]) - consumed)
         return consumed
 
     def is_passable(self, position: Position) -> bool:
@@ -109,9 +118,7 @@ class World:
         return kind is not TerrainKind.ROCK
 
     def movement_cost(self, position: Position) -> float:
-        index: int = self.index(position)
-        slope: float = estimate_slope(self.width, self.height, self.height_map, index)
-        return walk_cost(self.terrain[index], slope)
+        return float(self.movement_costs[self.index(position)])
 
     def step_environment(
         self, rng: random.Random, config: SimConfig, tick: int = -1
@@ -189,6 +196,9 @@ def generate_world(
     )
     food: FloatGrid = np.asarray(food_values, dtype=np.float64)
     food_capacity: FloatGrid = np.asarray(food_capacity_values, dtype=np.float64)
+    movement_costs: FloatGrid = compute_all_movement_costs(
+        config.width, config.height, height_map, terrain
+    )
     return World(
         width=config.width,
         height=config.height,
@@ -197,6 +207,7 @@ def generate_world(
         water=water,
         food=food,
         food_capacity=food_capacity,
+        movement_costs=movement_costs,
         discoverables=discoverables or {},
         seed=config.seed,
         tile_size_meters=config.tile_size_meters,
