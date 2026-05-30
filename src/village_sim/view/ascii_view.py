@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from village_sim.agent.state import AgentState
-from village_sim.core.types import ActionKind, Position, ResourceKind, TerrainKind
+from village_sim.core.types import ActionKind, Position, TerrainKind
 from village_sim.world.discoverables import DiscoverableKind
 from village_sim.world.grid import index_of, iter_neighbor_positions
 from village_sim.world.world import World
@@ -39,9 +39,6 @@ ROLE_COLORS: dict[str, str] = {
     "agent": "#fff176",
     "agent_sleeping": "#d7b85b",
     "water": "#4fc3f7",
-    "remembered_water": "#26c6da",
-    "remembered_food": "#ec407a",
-    "stale_memory": "#8d7a65",
     "broadleaf": "#66bb6a",
     "evergreen": "#2e7d32",
     "grass": "#a5d66a",
@@ -79,7 +76,6 @@ def render_map_model(
     tile_scale: str = _format_tile_scale(world.tile_size_meters)
     legend: str = (
         "Legend: @ agent, z sleeping, ~ stream/water, * food/berries, "
-        "W/w remembered water, F/f remembered food, "
         '♣ broadleaf, ♠ evergreen, . short grass, , uneven grass, " brush, '
         "; wetland/reeds, ^ hill/elevation, # rock, C cave | "
         f"Scale: 1 tile ≈ {tile_scale} x {tile_scale}"
@@ -132,9 +128,6 @@ def _glyph_for_position(
     kind: TerrainKind = TerrainKind(world.terrain[index])
     if kind is TerrainKind.WATER:
         return _glyph("~", "water")
-    memory_glyph: MapGlyph | None = _memory_glyph_at(agent, position)
-    if memory_glyph is not None:
-        return memory_glyph
     if _is_wetland_edge(world, position):
         return _glyph(";", "wetland")
     if kind is TerrainKind.GRASS:
@@ -159,21 +152,6 @@ def _decision_status(agent: AgentState) -> str:
     if trace.memory_confidence > 0.0:
         status = f"{status} conf={trace.memory_confidence:.2f}"
     return status
-
-
-def _memory_glyph_at(agent: AgentState, position: Position) -> MapGlyph | None:
-    for marker in agent.memory_markers:
-        if marker.position != position:
-            continue
-        if marker.confidence < 0.18:
-            return _glyph("?", "stale_memory")
-        if marker.kind is ResourceKind.WATER:
-            char = "W" if marker.confidence >= 0.75 else "w"
-            return _glyph(char, "remembered_water")
-        if marker.kind is ResourceKind.FOOD:
-            char = "F" if marker.confidence >= 0.75 else "f"
-            return _glyph(char, "remembered_food")
-    return None
 
 
 def _discoverable_glyph_at(world: World, position: Position) -> MapGlyph | None:
