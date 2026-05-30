@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
-from typing import List, Dict, Tuple, Any
-
 import numpy as np
 from numpy.typing import NDArray
 
 from village_sim.core.config import SimConfig
 from village_sim.core.types import Position, TerrainKind
-from village_sim.world.discoverables import Discoverable, update_discoverables_daily
+from village_sim.world.discoverables import (
+    Discoverable,
+    DiscoverableSpatialIndex,
+    build_discoverable_spatial_index,
+    update_discoverables_daily,
+)
 from village_sim.world.grid import index_of, iter_neighbor_positions, iter_positions
 from village_sim.world.resources import initialize_food, initialize_water, regrow_food
 from village_sim.world.water_system import (
@@ -61,6 +64,7 @@ class World:
     water_system: WaterSystemState = field(init=False)
     rain_system: RainSystem = field(default_factory=RainSystem)
     discoverables: dict[str, Discoverable] = field(default_factory=_new_discoverables)
+    discoverable_index: DiscoverableSpatialIndex = field(init=False)
     seed: int = 0
     tile_size_meters: float = 2.0
 
@@ -75,6 +79,11 @@ class World:
             self.movement_costs = compute_all_movement_costs(
                 self.width, self.height, self.height_map, self.terrain
             )
+        self.discoverable_index = build_discoverable_spatial_index(
+            self.width,
+            self.height,
+            self.discoverables,
+        )
 
     def index(self, position: Position) -> int:
         return index_of(self.width, position)

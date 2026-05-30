@@ -18,6 +18,7 @@ from village_sim.agent.memory import (
 from village_sim.agent.needs import update_needs_arrays
 from village_sim.agent.perception import (
     Observation,
+    max_resource_sightings,
     perceive,
     perceive_batch_resources,
     RESOURCE_KIND_WATER,
@@ -142,6 +143,14 @@ class Simulation:
         default=None, init=False
     )
     _last_memory_decision_tick: int = field(default=-1_000_000, init=False)
+    _perception_agent_ids: NDArray[np.int64] = field(init=False)
+    _perception_agent_x: NDArray[np.int32] = field(init=False)
+    _perception_agent_y: NDArray[np.int32] = field(init=False)
+    _perception_agent_alive: NDArray[np.bool_] = field(init=False)
+    _perception_out_agent_ids: NDArray[np.int64] = field(init=False)
+    _perception_out_tile_indices: NDArray[np.int64] = field(init=False)
+    _perception_out_kinds: NDArray[np.int32] = field(init=False)
+    _perception_out_amounts: NDArray[np.float64] = field(init=False)
 
     def __post_init__(self) -> None:
         self.config.validate()
@@ -173,9 +182,25 @@ class Simulation:
             world=self.world,
             water_system=self.world.water_system,
         )
+        self._init_perception_buffers()
         validate_arrays_match_dataclasses(self.agent_arrays, [self.agent])
         self._log("spawn", "agent spawned")
         self._log_weather_transition(self.current_weather)
+
+    def _init_perception_buffers(self) -> None:
+        self._perception_agent_ids = np.empty(1, dtype=np.int64)
+        self._perception_agent_x = np.empty(1, dtype=np.int32)
+        self._perception_agent_y = np.empty(1, dtype=np.int32)
+        self._perception_agent_alive = np.empty(1, dtype=np.bool_)
+        radius: int = max(
+            self.config.vision_radius_day,
+            self.config.vision_radius_night,
+        )
+        capacity: int = max_resource_sightings(1, radius)
+        self._perception_out_agent_ids = np.empty(capacity, dtype=np.int64)
+        self._perception_out_tile_indices = np.empty(capacity, dtype=np.int64)
+        self._perception_out_kinds = np.empty(capacity, dtype=np.int32)
+        self._perception_out_amounts = np.empty(capacity, dtype=np.float64)
 
     def _sync_agent_cache_to_arrays(self) -> None:
         sync_agent_to_arrays(self.agent_arrays, self.agent, 0)
@@ -371,14 +396,23 @@ class Simulation:
         is_sheltered: bool = self.agent_is_sheltered()
 
         # Batch Perception (Hot Path execution pushing arrays directly)
-        agent_ids_arr: NDArray[np.int64] = np.array([self.agent.agent_id], dtype=np.int64)
-        agent_x_arr: NDArray[np.int32] = np.array([self.agent.position.x], dtype=np.int32)
-        agent_y_arr: NDArray[np.int32] = np.array([self.agent.position.y], dtype=np.int32)
-        agent_alive_arr: NDArray[np.bool_] = np.array([self.agent.alive], dtype=np.bool_)
+        self._perception_agent_ids[0] = self.agent.agent_id
+        self._perception_agent_x[0] = self.agent.position.x
+        self._perception_agent_y[0] = self.agent.position.y
+        self._perception_agent_alive[0] = self.agent.alive
 
-        p_ids, p_tiles, p_kinds, p_amounts = perceive_batch_resources(
-            agent_ids_arr, agent_x_arr, agent_y_arr, agent_alive_arr, 
-            self.world, clock, self.config
+        _, p_tiles, p_kinds, p_amounts = perceive_batch_resources(
+            self._perception_agent_ids,
+            self._perception_agent_x,
+            self._perception_agent_y,
+            self._perception_agent_alive,
+            self.world,
+            clock,
+            self.config,
+            self._perception_out_agent_ids,
+            self._perception_out_tile_indices,
+            self._perception_out_kinds,
+            self._perception_out_amounts,
         )
 
         water_mask: NDArray[np.bool_] = p_kinds == RESOURCE_KIND_WATER
@@ -386,7 +420,6 @@ class Simulation:
         visible_water_indices: NDArray[np.int64] = p_tiles[water_mask]
         visible_food_indices: NDArray[np.int64] = p_tiles[food_mask]
 
-        # Legacy Perception (Kept solely as a bridge for Memory and GOAP snapshots)
         observation: Observation = perceive(
             self.world,
             self.agent.position,
@@ -395,40 +428,63 @@ class Simulation:
             weather,
             is_sheltered,
         )
-        
-        for sighting in observation.all_sightings():
-            is_new: bool = self.memory.observe(sighting, self.tick)
-            memory_record: ResourceMemory | None = self._memory_at(
-                sighting.kind, sighting.position
-            )
-            if is_new:
-                if sighting.kind is ResourceKind.WATER:
-                    self.agent.water_discoveries += 1
-                    self.learning.learned_water_sites += 1
+
+        for resource_kind, indices, amounts in (
+            (
+                ResourceKind.WATER,
+                observation.visible_water_indices,
+                observation.visible_water_amounts,
+            ),
+            (
+                ResourceKind.FOOD,
+                observation.visible_food_indices,
+                observation.visible_food_amounts,
+            ),
+        ):
+            for i in range(indices.shape[0]):
+                tile_index: int = int(indices[i])
+                position: Position = Position(
+                    x=tile_index % self.world.width,
+                    y=tile_index // self.world.width,
+                )
+                amount: float = float(amounts[i])
+                is_new: bool = self.memory.observe_resource(
+                    resource_kind,
+                    position,
+                    amount,
+                    self.tick,
+                )
+                memory_record: ResourceMemory | None = self._memory_at(
+                    resource_kind,
+                    position,
+                )
+                if is_new:
+                    if resource_kind is ResourceKind.WATER:
+                        self.agent.water_discoveries += 1
+                        self.learning.learned_water_sites += 1
+                    else:
+                        self.agent.food_discoveries += 1
+                        self.learning.learned_food_sites += 1
                     self._log_at(
                         "learning",
-                        self._learned_message(ResourceKind.WATER, sighting.position),
-                        sighting.position,
+                        self._learned_message(resource_kind, position),
+                        position,
                     )
-                elif sighting.kind is ResourceKind.FOOD:
-                    self.agent.food_discoveries += 1
-                    self.learning.learned_food_sites += 1
+                elif memory_record is not None:
+                    confidence: str = self._format_confidence(
+                        memory_record.decayed_confidence(self.tick, self.config)
+                    )
                     self._log_at(
                         "learning",
-                        self._learned_message(ResourceKind.FOOD, sighting.position),
-                        sighting.position,
+                        self._updated_memory_message(
+                            resource_kind, position, confidence
+                        ),
+                        position,
                     )
-            elif memory_record is not None:
-                confidence: str = self._format_confidence(
-                    memory_record.decayed_confidence(self.tick, self.config)
-                )
-                self._log_at(
-                    "learning",
-                    self._updated_memory_message(
-                        sighting.kind, sighting.position, confidence
-                    ),
-                    sighting.position,
-                )
+
+        visible_water_indices = observation.visible_water_indices
+        visible_food_indices = observation.visible_food_indices
+
         new_discoverable_ids: list[str] = update_discoverable_memory(
             self.discoverable_memory,
             observation.discoverables,
@@ -477,7 +533,7 @@ class Simulation:
         before_memory_state: dict[tuple[str, int, int], tuple[int, int]] = (
             self._memory_use_state()
         )
-        
+
         # Policy is entirely separated from the legacy Observation object
         action_message: str = choose_and_execute_action(
             self.agent,
@@ -489,7 +545,7 @@ class Simulation:
             self.rng,
             self.config,
         )
-        
+
         self._record_decision_trace()
         self._record_memory_use_deltas(before_memory_state)
         self._sync_memory_markers()

@@ -1,8 +1,9 @@
 """Discoverable world entities (§22–29).
 
 Discoverables are stable world objects with unique IDs that agents can
-perceive, remember, interact with, and deplete/refresh.  They are stored
-separately from terrain arrays.
+perceive, remember, interact with, and deplete/refresh. They are stored
+separately from terrain arrays and indexed by flat row-major cells for
+constant-time spatial lookup at runtime.
 """
 
 from __future__ import annotations
@@ -49,6 +50,45 @@ class Discoverable:
     satisfies_need: str  # "hunger" | "thirst" | "cold_stress"
     need_delta: float  # negative means need decreases (good)
     interaction_ticks: int  # ticks consumed by one exploitation
+
+
+# ── Spatial index (§26) ───────────────────────────────────────────────────────
+
+
+@dataclass(slots=True)
+class DiscoverableSpatialIndex:
+    """Flat row-major spatial index for discoverable lookup."""
+
+    width: int
+    height: int
+    cells: list[list[Discoverable]]
+
+    def cell_index(self, x: int, y: int) -> int:
+        return y * self.width + x
+
+    def in_bounds(self, x: int, y: int) -> bool:
+        return 0 <= x < self.width and 0 <= y < self.height
+
+    def at(self, x: int, y: int) -> list[Discoverable]:
+        if not self.in_bounds(x, y):
+            return []
+        return self.cells[self.cell_index(x, y)]
+
+
+def build_discoverable_spatial_index(
+    width: int,
+    height: int,
+    discoverables: dict[str, Discoverable],
+) -> DiscoverableSpatialIndex:
+    """Build a flat per-tile index from stable world-generation discoverables."""
+
+    cells: list[list[Discoverable]] = [
+        list[Discoverable]() for _ in range(width * height)
+    ]
+    for item in discoverables.values():
+        if 0 <= item.x < width and 0 <= item.y < height:
+            cells[item.y * width + item.x].append(item)
+    return DiscoverableSpatialIndex(width=width, height=height, cells=cells)
 
 
 # ── Canonical seed instances (§24, §25) ───────────────────────────────────────
@@ -118,6 +158,14 @@ class DiscoverableWorld:
     width: int
     height: int
     discoverables: dict[str, Discoverable]
+    discoverable_index: DiscoverableSpatialIndex = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.discoverable_index = build_discoverable_spatial_index(
+            self.width,
+            self.height,
+            self.discoverables,
+        )
 
 
 def make_initial_discoverables() -> dict[str, Discoverable]:
@@ -138,13 +186,16 @@ def make_discoverable_test_world() -> DiscoverableWorld:
     )
 
 
-# ── Protocol: any world with a discoverables dict (§26) ──────────────────────
+# ── Protocol: any world with indexed discoverables (§26) ──────────────────────
 
 
 class HasDiscoverables(Protocol):
-    """Structural type: any world-like object with a discoverables dict."""
+    """Structural type: any world-like object with indexed discoverables."""
 
+    width: int
+    height: int
     discoverables: dict[str, Discoverable]
+    discoverable_index: DiscoverableSpatialIndex
 
 
 # ── Perception (§26) ─────────────────────────────────────────────────────────
@@ -161,6 +212,16 @@ class DiscoverableObservation:
     amount: float
 
 
+def refresh_discoverable_spatial_index(world: HasDiscoverables) -> None:
+    """Rebuild the spatial index after external discoverable position changes."""
+
+    world.discoverable_index = build_discoverable_spatial_index(
+        world.width,
+        world.height,
+        world.discoverables,
+    )
+
+
 def nearby_discoverables(
     world: HasDiscoverables,
     x: int,
@@ -168,12 +229,28 @@ def nearby_discoverables(
     radius: int,
 ) -> list[Discoverable]:
     """Return all discoverables within Euclidean *radius* of (x, y)."""
+
     found: list[Discoverable] = []
-    for item in world.discoverables.values():
-        dx: int = item.x - x
-        dy: int = item.y - y
-        if dx * dx + dy * dy <= radius * radius:
-            found.append(item)
+    if radius < 0:
+        return found
+
+    index: DiscoverableSpatialIndex = world.discoverable_index
+    radius_squared: int = radius * radius
+    min_y: int = max(0, y - radius)
+    max_y: int = min(index.height - 1, y + radius)
+    min_x: int = max(0, x - radius)
+    max_x: int = min(index.width - 1, x + radius)
+
+    for cy in range(min_y, max_y + 1):
+        dy: int = cy - y
+        dy_squared: int = dy * dy
+        row_offset: int = cy * index.width
+        for cx in range(min_x, max_x + 1):
+            dx: int = cx - x
+            if dx * dx + dy_squared > radius_squared:
+                continue
+            for item in index.cells[row_offset + cx]:
+                found.append(item)
     return found
 
 
@@ -184,6 +261,7 @@ def perceive_discoverables(
     vision_radius: int,
 ) -> list[DiscoverableObservation]:
     """Return observations for all discoverables within vision radius."""
+
     observations: list[DiscoverableObservation] = []
     for item in nearby_discoverables(world, agent_x, agent_y, vision_radius):
         observations.append(
@@ -232,6 +310,7 @@ def update_discoverable_memory(
 
     First sighting sets confidence=1.0; subsequent sightings refresh it.
     """
+
     newly_discovered: list[str] = []
     for item in observations:
         if item.discoverable_id not in memory.discoverables:
@@ -282,13 +361,25 @@ def discoverable_at_or_adjacent(
     y: int,
 ) -> Discoverable | None:
     """Return the closest discoverable within Chebyshev distance one."""
+
+    index: DiscoverableSpatialIndex = world.discoverable_index
     best: Discoverable | None = None
     best_distance: int = 2
-    for item in world.discoverables.values():
-        distance: int = max(abs(item.x - x), abs(item.y - y))
-        if distance <= 1 and distance < best_distance:
-            best = item
-            best_distance = distance
+    min_y: int = max(0, y - 1)
+    max_y: int = min(index.height - 1, y + 1)
+    min_x: int = max(0, x - 1)
+    max_x: int = min(index.width - 1, x + 1)
+
+    for cy in range(min_y, max_y + 1):
+        row_offset: int = cy * index.width
+        for cx in range(min_x, max_x + 1):
+            distance: int = max(abs(cx - x), abs(cy - y))
+            if distance > best_distance:
+                continue
+            for item in index.cells[row_offset + cx]:
+                if distance < best_distance:
+                    best = item
+                    best_distance = distance
     return best
 
 
@@ -301,6 +392,7 @@ def exploit_discoverable(
     Returns True on success, False when the resource is depleted or the
     satisfies_need field is unrecognised.
     """
+
     if item.amount <= 0.0:
         return False
 
@@ -326,6 +418,7 @@ def exploit_nearby_discoverable(
     position: Position,
 ) -> str | None:
     """Exploit an adjacent discoverable and return its ID on success."""
+
     item = discoverable_at_or_adjacent(world, position.x, position.y)
     if item is None:
         return None
@@ -339,6 +432,7 @@ def exploit_nearby_discoverable(
 
 def update_discoverables_daily(world: HasDiscoverables) -> None:
     """Replenish depletable discoverables once per simulated day."""
+
     for item in world.discoverables.values():
         if item.regrowth_per_day <= 0.0:
             continue

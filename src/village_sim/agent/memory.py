@@ -169,23 +169,35 @@ class AgentMemory:
     def observe(self, sighting: ResourceSighting, tick: int) -> bool:
         """Record a sighting. Return True when this was a new location."""
 
-        key: tuple[ResourceKind, int, int] = _key(sighting.kind, sighting.position)
+        return self.observe_resource(
+            kind=sighting.kind,
+            position=sighting.position,
+            amount=sighting.amount,
+            tick=tick,
+        )
+
+    def observe_resource(
+        self, kind: ResourceKind, position: Position, amount: float, tick: int
+    ) -> bool:
+        """Record a resource sighting without allocating a ResourceSighting object."""
+
+        key: tuple[ResourceKind, int, int] = _key(kind, position)
         index: int | None = self._lookup.get(key)
         if index is not None:
             memory: ResourceMemory = self._memories[index]
             memory.last_seen_tick = tick
-            memory.last_amount = sighting.amount
+            memory.last_amount = amount
             memory.confidence = min(1.0, max(memory.confidence, 0.50) + 0.12)
-            if sighting.amount > 0.0:
+            if amount > 0.0:
                 memory.failed_uses = max(0, memory.failed_uses - 1)
             return False
 
         self.append_resource_memory(
             ResourceMemory(
-                position=sighting.position,
-                kind=sighting.kind,
+                position=position,
+                kind=kind,
                 last_seen_tick=tick,
-                last_amount=sighting.amount,
+                last_amount=amount,
                 confidence=0.70,
             )
         )
