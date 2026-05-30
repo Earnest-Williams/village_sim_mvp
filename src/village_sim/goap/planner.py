@@ -238,10 +238,7 @@ def _plan_with_actions(
             )
         ).astype(np.int64, copy=False)
         keep_count: int = min(beam_width, candidate_count)
-        frontier_node_indices = np.empty(keep_count, dtype=np.int64)
-        for new_index in range(keep_count):
-            old_index: int = int(ordered_indices[new_index])
-            frontier_node_indices[new_index] = candidate_node_indices[old_index]
+        frontier_node_indices = candidate_node_indices[ordered_indices[:keep_count]]
 
     if best_plan_node_index == _NO_PARENT_NODE:
         return []
