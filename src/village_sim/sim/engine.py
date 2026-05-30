@@ -15,6 +15,7 @@ from village_sim.agent.decision import DecisionSource
 from village_sim.agent.memory import (
     AgentMemory,
     DiscoverableAgentMemory,
+    GlobalMemory,
     ResourceMemory,
 )
 from village_sim.agent.needs import update_needs_arrays
@@ -128,6 +129,7 @@ class Simulation:
     """
 
     config: SimConfig
+    max_agents: int = MAX_AGENTS
     profiler: SimulationTimings | None = None
     rng: random.Random = field(init=False)
     world: World = field(init=False)
@@ -136,6 +138,7 @@ class Simulation:
     agent_arrays: AgentArrays = field(init=False)
     state: SimulationState = field(init=False)
     memory: AgentMemory = field(init=False)
+    global_memory: GlobalMemory = field(init=False)
     discoverable_memory: DiscoverableAgentMemory = field(init=False)
     orchestrator: Orchestrator = field(init=False)
     action_library: ActionLibrary = field(init=False)
@@ -180,17 +183,21 @@ class Simulation:
         spawn_position = choose_spawn_position(self.world, self.rng)
         self.agent = AgentState(agent_id=1, position=spawn_position)
         self.agent.ensure_visit_buffer(self.world.width * self.world.height)
-        self.agents = make_agent_arrays(MAX_AGENTS)
+        self.agents = make_agent_arrays(self.max_agents)
         self.agent_arrays = self.agents
-        self.agent_ids = np.zeros(MAX_AGENTS, dtype=np.int64)
+        self.agent_ids = np.zeros(self.max_agents, dtype=np.int64)
         self.agent_ids[0] = np.int64(self.agent.agent_id)
         sync_agent_to_arrays(self.agents, self.agent, 0)
-        self.memory = AgentMemory(agent_id=self.agent.agent_id)
+        self.global_memory = GlobalMemory()
+        self.memory = AgentMemory(
+            agent_id=self.agent.agent_id,
+            global_memory=self.global_memory,
+        )
         self.discoverable_memory = DiscoverableAgentMemory()
         self.orchestrator = Orchestrator()
         self.action_library = ActionLibrary()
         self.action_knowledge_frame = pl.DataFrame(schema=ACTION_KNOWLEDGE_SCHEMA)
-        self.economy = Economy(MAX_AGENTS)
+        self.economy = Economy(self.max_agents)
         initial_clock: SimClock = clock_from_tick(self.tick, self.config)
         self.current_weather = make_weather_state(
             is_raining=False,
@@ -212,7 +219,7 @@ class Simulation:
             self.config.vision_radius_day,
             self.config.vision_radius_night,
         )
-        capacity: int = max_resource_sightings(MAX_AGENTS, radius)
+        capacity: int = max_resource_sightings(self.max_agents, radius)
         self._perception_out_agent_ids = np.empty(capacity, dtype=np.int64)
         self._perception_out_tile_indices = np.empty(capacity, dtype=np.int64)
         self._perception_out_kinds = np.empty(capacity, dtype=np.int32)
@@ -294,7 +301,7 @@ class Simulation:
         return max(needs, key=lambda reason: needs[reason])
 
     def step(self) -> None:
-        """Advance all active agents with vectorized batch operations."""
+        """Execute one tick across all active agents via matrix operations."""
 
         if self.tick >= self.config.max_ticks():
             return
@@ -302,15 +309,14 @@ class Simulation:
         environment_start: float = perf_counter()
         clock: SimClock = clock_from_tick(self.tick, self.config)
         raining: bool = self.world.step_environment(self.rng, self.config, self.tick)
-        weather: WeatherState = make_weather_state(
+        self.current_weather = make_weather_state(
             is_raining=raining,
             is_night=clock.is_night,
             config=self.config,
         )
-        self.current_weather = weather
         if raining and self.tick % 12 == 0:
             self._log("weather", "rain fell")
-        self._log_weather_transition(weather)
+        self._log_weather_transition(self.current_weather)
         self._record_timing("environment", perf_counter() - environment_start)
 
         spawn_interval: int = self.config.ticks_per_day * 90
@@ -318,8 +324,94 @@ class Simulation:
             self.spawn_settlers(self.rng.randint(1, 3), self.tick)
 
         active_mask: NDArray[np.bool_] = self.agents.active.copy()
-        if bool(np.any(active_mask)):
-            self._step_agents(clock, weather, active_mask)
+        if not bool(np.any(active_mask)):
+            self.tick += 1
+            return
+        if int(np.count_nonzero(active_mask)) == 1:
+            self._step_single_agent_compat(clock, self.current_weather, active_mask)
+            self.tick += 1
+            return
+
+        needs_start: float = perf_counter()
+        update_needs_arrays(
+            self.agents,
+            self.config,
+            is_night=clock.is_night,
+            is_raining=self.current_weather.is_raining,
+            is_sheltered=False,
+            is_cold_exposed=self.current_weather.feels_cold,
+        )
+        active_mask = self.agents.active.copy()
+        self._record_timing("policy_pathing", perf_counter() - needs_start)
+        if not bool(np.any(active_mask)):
+            self._sync_agent_cache_from_arrays()
+            if not self.agent.alive:
+                self._log_agent_death()
+            self.tick += 1
+            return
+
+        perception_start: float = perf_counter()
+        p_agent_rows, p_tiles, p_kinds, p_amounts = perceive_all(
+            self.agents,
+            self.world,
+            clock,
+            self.config,
+            self._perception_out_agent_ids,
+            self._perception_out_tile_indices,
+            self._perception_out_kinds,
+            self._perception_out_amounts,
+        )
+        self.global_memory.observe_batch(
+            agent_ids=self.agent_ids[p_agent_rows],
+            tile_indices=p_tiles,
+            kind_ids=p_kinds,
+            amounts=p_amounts,
+            world_width=self.world.width,
+            tick=self.tick,
+        )
+        if int(np.count_nonzero(active_mask)) == 1:
+            memory_frame: pl.DataFrame = self.global_memory.memories_for_agent(
+                self.memory.agent_id
+            )
+            water_memory: pl.DataFrame = memory_frame.filter(pl.col("kind") == 1)
+            food_memory: pl.DataFrame = memory_frame.filter(pl.col("kind") == 2)
+            self.agent.water_discoveries = water_memory.height
+            self.agent.food_discoveries = food_memory.height
+            self.learning.learned_water_sites = water_memory.height
+            self.learning.learned_food_sites = food_memory.height
+        self._record_timing("perception", perf_counter() - perception_start)
+
+        trade_start: float = perf_counter()
+        self.economy.inventory_surplus[:] = np.where(
+            active_mask,
+            np.maximum(np.float32(0.0), np.float32(1.0) - self.agents.hunger),
+            np.float32(0.0),
+        ).astype(np.float32, copy=False)
+        buyers, sellers, values = compute_trade_opportunities(
+            active_mask,
+            self.agents.x,
+            self.agents.y,
+            self.agents.hunger,
+            self.economy.inventory_surplus,
+            vision_radius=2,
+        )
+        self.economy.batch_transact(buyers, sellers, values)
+        self._record_timing("policy_pathing", perf_counter() - trade_start)
+
+        memory_start: float = perf_counter()
+        self.global_memory.decay_confidence(self.tick, self.config)
+        self._record_timing("perception", perf_counter() - memory_start)
+
+        death_mask: NDArray[np.bool_] = active_mask & (
+            (self.agents.thirst >= np.float32(1.0))
+            | (self.agents.hunger >= np.float32(1.0))
+            | (self.agents.health <= np.float32(0.0))
+        )
+        self.agents.active[death_mask] = False
+        self._sync_agent_cache_from_arrays()
+        self._log_cold_status_transition()
+        if not self.agent.alive:
+            self._log_agent_death()
 
         self.tick += 1
 
@@ -448,7 +540,7 @@ class Simulation:
             ascii_map=ascii_map,
         )
 
-    def _step_agents(
+    def _step_single_agent_compat(
         self,
         clock: SimClock,
         weather: WeatherState,

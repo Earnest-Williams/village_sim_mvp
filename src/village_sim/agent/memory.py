@@ -264,6 +264,36 @@ class GlobalMemory:
         )
         self.frame = self._enforce_capacity(unique)
 
+    def decay_confidence(self, tick: int, config: SimConfig) -> None:
+        """Decay all stored memory confidence values with a columnar update."""
+
+        if tick < 0:
+            raise ValueError("tick must be non-negative")
+        self.flush_pending()
+        if self.frame.is_empty():
+            return
+
+        water_decay: float = config.water_memory_decay_per_day / float(
+            config.ticks_per_day
+        )
+        food_decay: float = config.food_memory_decay_per_day / float(
+            config.ticks_per_day
+        )
+        decay_rate = (
+            pl.when(pl.col(MEMORY_KIND) == _kind_id(ResourceKind.WATER))
+            .then(pl.lit(water_decay, dtype=pl.Float32))
+            .otherwise(pl.lit(food_decay, dtype=pl.Float32))
+        )
+        self.frame = (
+            self.frame.with_columns(
+                (pl.col(MEMORY_CONFIDENCE) - decay_rate)
+                .clip(0.0, 1.0)
+                .alias(MEMORY_CONFIDENCE),
+            )
+            .filter(pl.col(MEMORY_CONFIDENCE) > 0.0)
+            .cast(MEMORY_SCHEMA)
+        )
+
     def queue_memory(self, agent_id: int, memory: ResourceMemory) -> None:
         key = _memory_key(agent_id, memory.kind, memory.position)
         pending = self._pending_dict.get(key)
