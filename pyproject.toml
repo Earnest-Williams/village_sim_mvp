@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "village-sim-mvp"
 version = "0.1.0"
-description = "A stdlib-only, headless-first medieval survival simulation MVP."
+description = "A headless-first medieval survival simulation MVP with MessagePack persistence."
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [{ name = "Earnest Williams" }]
 license = { text = "MIT" }
-dependencies = []
+dependencies = ["msgpack>=1.0"]
 
 [project.optional-dependencies]
 gui = ["wxPython>=4.2"]
@@ -33,3 +33,7 @@ warn_unreachable = true
 typeCheckingMode = "strict"
 pythonVersion = "3.12"
 include = ["src", "tests"]
+
+[[tool.mypy.overrides]]
+module = "msgpack"
+ignore_missing_imports = true

@@ -43,7 +43,7 @@ class LearningStats:
         )
         return float(self.memory_directed_resource_ticks) / float(max(1, total))
 
-    def to_json_obj(self) -> dict[str, Any]:
+    def to_msgpack_obj(self) -> dict[str, Any]:
         data: dict[str, Any] = asdict(self)
         data["memory_directed_resource_ticks"] = self.memory_directed_resource_ticks
         data["exploration_resource_ticks"] = self.exploration_resource_ticks
@@ -92,7 +92,7 @@ class SimResult:
     goap_plan_executions: int = 0
     successful_goap_plan_executions: int = 0
 
-    def to_json_obj(self) -> dict[str, Any]:
+    def to_msgpack_obj(self) -> dict[str, Any]:
         data: dict[str, Any] = asdict(self)
-        data["learning"] = self.learning.to_json_obj()
+        data["learning"] = self.learning.to_msgpack_obj()
         return data

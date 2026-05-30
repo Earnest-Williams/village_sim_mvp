@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import json
+import msgpack
 from dataclasses import dataclass
 from pathlib import Path
 
+from village_sim.msgpack_codec import pack_default, unpack_object_hook
 from village_sim.orchestrator.symbolic import FactValue
 
-JsonValue = FactValue | None | list["JsonValue"] | dict[str, "JsonValue"]
+MsgpackValue = FactValue | None | list["MsgpackValue"] | dict[str, "MsgpackValue"]
 
 
 # ── Packet types (§20) ────────────────────────────────────────────────────────
@@ -20,9 +21,9 @@ class WorldFactPacket:
     fact_type: str  # e.g. "resource_location"
     source_agent_id: str
     confidence: float
-    data: dict[str, JsonValue]  # resource_id, resource_type, coordinates
+    data: dict[str, MsgpackValue]  # resource_id, resource_type, coordinates
 
-    def to_dict(self) -> dict[str, JsonValue]:
+    def to_dict(self) -> dict[str, MsgpackValue]:
         return {
             "knowledge_type": self.knowledge_type,
             "fact_type": self.fact_type,
@@ -40,7 +41,7 @@ class ActionKnowledgePacket:
     action_id: str
     policy_id: str
 
-    def to_dict(self) -> dict[str, JsonValue]:
+    def to_dict(self) -> dict[str, MsgpackValue]:
         return {
             "knowledge_type": self.knowledge_type,
             "source_agent_id": self.source_agent_id,
@@ -75,39 +76,46 @@ def imported_confidence(
 
 
 def save_packets(packets: list[KnowledgePacket], path: Path) -> None:
-    """Serialise knowledge packets to a JSON file (generates data, not code §34)."""
-    data: list[dict[str, JsonValue]] = [packet.to_dict() for packet in packets]
-    path.write_text(json.dumps(data, indent=2))
+    """Serialise knowledge packets to a MessagePack file (generates data, not code §34)."""
+    data: list[KnowledgePacket] = packets
+    with path.open("wb") as packet_file:
+        msgpack.pack(data, packet_file, default=pack_default, use_bin_type=True)
 
 
-def load_packets(path: Path) -> list[dict[str, JsonValue]]:
-    """Load knowledge packets from a JSON file."""
-    raw = json.loads(path.read_text())
+def load_packets(path: Path) -> list[dict[str, MsgpackValue]]:
+    """Load knowledge packets from a MessagePack file."""
+    with path.open("rb") as packet_file:
+        raw: object = msgpack.unpack(
+            packet_file, raw=False, object_hook=unpack_object_hook
+        )
     if not isinstance(raw, list):
-        raise ValueError("knowledge packet file must contain a JSON list")
+        raise ValueError("knowledge packet file must contain a MessagePack list")
 
-    packets: list[dict[str, JsonValue]] = []
+    packets: list[dict[str, MsgpackValue]] = []
     for item in raw:
+        if isinstance(item, WorldFactPacket | ActionKnowledgePacket):
+            item = item.to_dict()
         if not isinstance(item, dict):
-            raise ValueError("each knowledge packet must be a JSON object")
-        packet: dict[str, JsonValue] = {}
+            raise ValueError("each knowledge packet must be a MessagePack object")
+        packet: dict[str, MsgpackValue] = {}
         for key, value in item.items():
             if not isinstance(key, str):
                 raise ValueError("knowledge packet keys must be strings")
-            if not _is_json_value(value):
-                raise ValueError(f"unsupported JSON value for key {key!r}")
+            if not _is_msgpack_value(value):
+                raise ValueError(f"unsupported MessagePack value for key {key!r}")
             packet[key] = value
         packets.append(packet)
     return packets
 
 
-def _is_json_value(value: object) -> bool:
+def _is_msgpack_value(value: object) -> bool:
     if value is None or isinstance(value, str | int | float | bool):
         return True
     if isinstance(value, list):
-        return all(_is_json_value(item) for item in value)
+        return all(_is_msgpack_value(item) for item in value)
     if isinstance(value, dict):
         return all(
-            isinstance(key, str) and _is_json_value(item) for key, item in value.items()
+            isinstance(key, str) and _is_msgpack_value(item)
+            for key, item in value.items()
         )
     return False

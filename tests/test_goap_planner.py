@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import unittest
 
+import msgpack
 from village_sim.goap.planner import (
     _action_advances_goal,
     _action_applicable,
     _expected_cost,
     plan,
 )
+from village_sim.msgpack_codec import pack_default, unpack_object_hook
 from village_sim.orchestrator.action_model import (
     ActionConfidence,
     ActionLifecycle,
@@ -165,6 +167,21 @@ class TestActionAdvancesGoal(unittest.TestCase):
         goal = {"thirst_bucket": "low"}
         state: dict[str, FactValue] = {"thirst_bucket": "low"}
         self.assertFalse(_action_advances_goal(action, state, goal))
+
+
+class TestMsgpackExecutionPayloadRoundTrip(unittest.TestCase):
+    def test_preserves_executor_type_enum(self) -> None:
+        payload = ExecutionPayload(
+            type=ExecutorType.PATHFINDER,
+            policy_id="pathfinder_v1",
+            policy_version=1,
+            target_binding=TargetBinding(mode="resource_id", resource_id="spring_001"),
+        )
+        raw = msgpack.packb(payload, default=pack_default, use_bin_type=True)
+        restored = msgpack.unpackb(raw, raw=False, object_hook=unpack_object_hook)
+        self.assertIsInstance(restored, ExecutionPayload)
+        self.assertIs(restored.type, ExecutorType.PATHFINDER)
+        self.assertEqual(restored.type.value, "PATHFINDER")
 
 
 class TestPlan(unittest.TestCase):

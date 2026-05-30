@@ -12,7 +12,7 @@ class SimulationTests(unittest.TestCase):
         result_a = Simulation(config).run()
         result_b = Simulation(config).run()
 
-        self.assertEqual(result_a.to_json_obj(), result_b.to_json_obj())
+        self.assertEqual(result_a.to_msgpack_obj(), result_b.to_msgpack_obj())
 
     def test_simulation_runs_and_emits_events(self) -> None:
         config = SimConfig(width=32, height=32, max_days=3, seed=5)

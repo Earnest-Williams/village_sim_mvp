@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import json
+import msgpack
 import tempfile
 import unittest
 from pathlib import Path
@@ -80,7 +80,7 @@ class TestPacketSerialisationRoundTrip(unittest.TestCase):
             },
         )
         with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "packets.json"
+            path = Path(tmpdir) / "packets.msgpack"
             save_packets([packet], path)
             loaded = load_packets(path)
 
@@ -101,7 +101,7 @@ class TestPacketSerialisationRoundTrip(unittest.TestCase):
             policy_id="rl_spring_v1",
         )
         with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "packets.json"
+            path = Path(tmpdir) / "packets.msgpack"
             save_packets([packet], path)
             loaded = load_packets(path)
 
@@ -125,7 +125,7 @@ class TestPacketSerialisationRoundTrip(unittest.TestCase):
             policy_id="rl_bush_v1",
         )
         with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "packets.json"
+            path = Path(tmpdir) / "packets.msgpack"
             save_packets([world_packet, action_packet], path)
             loaded = load_packets(path)
 
@@ -134,7 +134,7 @@ class TestPacketSerialisationRoundTrip(unittest.TestCase):
         self.assertIn("world_fact", types)
         self.assertIn("action_model", types)
 
-    def test_json_file_is_valid_json(self) -> None:
+    def test_msgpack_file_is_valid_msgpack(self) -> None:
         packet = WorldFactPacket(
             knowledge_type="world_fact",
             fact_type="resource_location",
@@ -143,10 +143,10 @@ class TestPacketSerialisationRoundTrip(unittest.TestCase):
             data={"resource_id": "spring_001"},
         )
         with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "packets.json"
+            path = Path(tmpdir) / "packets.msgpack"
             save_packets([packet], path)
-            raw = path.read_text()
-            parsed = json.loads(raw)
+            raw = path.read_bytes()
+            parsed = msgpack.unpackb(raw, raw=False)
 
         self.assertIsInstance(parsed, list)
 

@@ -428,13 +428,13 @@ def _move_downhill_or_sideways(
     for neighbor_index in state.neighbors4[index]:
         if height_map[neighbor_index] > height_map[index] + config.sideways_height_slop:
             continue
-        neighbor_surface: float = (
+        spread_surface: float = (
             height_map[neighbor_index]
             + water[neighbor_index] * config.water_height_scale
         )
-        if neighbor_surface < best_surface:
+        if spread_surface < best_surface:
             best_spread = neighbor_index
-            best_surface = neighbor_surface
+            best_surface = spread_surface
 
     if best_spread < 0:
         return False

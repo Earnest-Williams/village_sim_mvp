@@ -2,7 +2,7 @@
 
 A Python-only, headless-first survival simulation MVP for a low-graphics medieval village simulator.
 
-This version intentionally uses only the Python standard library. It is designed to be easy to migrate later to NumPy, Numba, Mojo, Rust, Godot, Bevy, or another renderer/training system.
+This version keeps the simulation core lightweight and uses MessagePack for binary persistence. It is designed to be easy to migrate later to NumPy, Numba, Mojo, Rust, Godot, Bevy, or another renderer/training system.
 
 ## What this MVP includes
 
@@ -14,7 +14,7 @@ This version intentionally uses only the Python standard library. It is designed
 - Resource memory with confidence and staleness.
 - Headless deterministic simulation from seed and config.
 - ASCII debug map.
-- JSON run output with metrics, events, and optional snapshots.
+- MessagePack run output with metrics, events, and optional snapshots.
 - Unit tests using `unittest`.
 
 ## Run without installing
@@ -28,13 +28,13 @@ PYTHONPATH=src python -m village_sim --seed 1 --days 10 --width 32 --height 32 -
 Save a run report:
 
 ```bash
-PYTHONPATH=src python -m village_sim --seed 1 --days 10 --width 32 --height 32 --replay runs/seed_1.json
+PYTHONPATH=src python -m village_sim --seed 1 --days 10 --width 32 --height 32 --replay runs/seed_1.msgpack
 ```
 
-Include periodic ASCII snapshots in the JSON report:
+Include periodic ASCII snapshots in the MessagePack report:
 
 ```bash
-PYTHONPATH=src python -m village_sim --seed 1 --days 10 --width 32 --height 32 --snapshot-every 144 --replay runs/seed_1.json
+PYTHONPATH=src python -m village_sim --seed 1 --days 10 --width 32 --height 32 --snapshot-every 144 --replay runs/seed_1.msgpack
 ```
 
 Run several seeds:
@@ -111,7 +111,7 @@ World state uses portable scalar IDs, ints, floats, lists, dataclasses, and enum
 - `world.hydrology` can move to NumPy, Numba, Mojo, Rust, or C++.
 - `agent.policy` can be replaced with evolutionary search or RL.
 - `view.ascii_view` can be replaced with pygame-ce, Godot, Bevy, Unity, or a web viewer.
-- `sim.replay` can move from JSON to MessagePack.
+- `sim.replay` persists portable binary MessagePack reports.
 
 ## MVP success condition
 
@@ -162,7 +162,7 @@ Use a short discoverable GOAP run with replay snapshots to see the existing
 cold-weather and cave-shelter signals:
 
 ```bash
-PYTHONPATH=src python -m village_sim --seed 1 --days 3 --discoverables --goap --snapshot-every 12 --replay /tmp/village_replay.json
+PYTHONPATH=src python -m village_sim --seed 1 --days 3 --discoverables --goap --snapshot-every 12 --replay /tmp/village_replay.msgpack
 ```
 
 Representative events and summary lines include:
@@ -189,8 +189,8 @@ PYTHONPATH=src python -m village_sim --seed 1 --days 2 --width 32 --height 32 --
 Action libraries can be persisted and reused across runs:
 
 ```bash
-PYTHONPATH=src python -m village_sim --seed 1 --days 2 --width 32 --height 32 --discoverables --goap --action-library-out /tmp/village_actions.json
-PYTHONPATH=src python -m village_sim --seed 2 --days 2 --width 32 --height 32 --discoverables --goap --action-library-in /tmp/village_actions.json
+PYTHONPATH=src python -m village_sim --seed 1 --days 2 --width 32 --height 32 --discoverables --goap --action-library-out /tmp/village_actions.msgpack
+PYTHONPATH=src python -m village_sim --seed 2 --days 2 --width 32 --height 32 --discoverables --goap --action-library-in /tmp/village_actions.msgpack
 ```
 
 Current supported chain:

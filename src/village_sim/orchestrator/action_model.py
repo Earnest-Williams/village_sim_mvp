@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import json
+import msgpack
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, cast
 
+from village_sim.msgpack_codec import pack_default, unpack_object_hook
 from village_sim.orchestrator.induction import EffectEstimate
 from village_sim.orchestrator.symbolic import FactValue
 
@@ -96,12 +97,20 @@ class SynthesizedAction:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
-    def to_json(self, indent: int = 2) -> str:
-        return json.dumps(self.to_dict(), indent=indent)
+    def to_msgpack(self) -> bytes:
+        packed = msgpack.packb(self, default=pack_default, use_bin_type=True)
+        if not isinstance(packed, bytes):
+            raise TypeError("MessagePack packb did not return bytes")
+        return packed
 
     @staticmethod
     def from_dict(data: dict[str, Any]) -> SynthesizedAction:
-        """Deserialise from a plain dict (e.g. loaded from JSON)."""
+        """Deserialise from a plain MessagePack-compatible dict."""
+        effects = _effect_estimates_from_raw(data.get("effects", {}))
+        side_effects = _effect_estimates_from_raw(data.get("side_effects", {}))
+        cost_model = _cost_model_from_raw(data["cost_model"])
+        confidence = _confidence_from_raw(data["confidence"])
+        execution_payload = _execution_payload_from_raw(data["execution_payload"])
         return SynthesizedAction(
             schema_version=data["schema_version"],
             action_id=data["action_id"],
@@ -110,24 +119,67 @@ class SynthesizedAction:
             lifecycle=ActionLifecycle(data["lifecycle"]),
             preconditions=data["preconditions"],
             soft_preconditions=data.get("soft_preconditions", {}),
-            effects={
-                k: EffectEstimate(**v) for k, v in data.get("effects", {}).items()
-            },
-            side_effects={
-                k: EffectEstimate(**v) for k, v in data.get("side_effects", {}).items()
-            },
-            cost_model=CostModel(**data["cost_model"]),
-            confidence=ActionConfidence(**data["confidence"]),
-            execution_payload=ExecutionPayload(
-                type=ExecutorType(data["execution_payload"]["type"]),
-                policy_id=data["execution_payload"]["policy_id"],
-                policy_version=data["execution_payload"]["policy_version"],
-                target_binding=TargetBinding(
-                    **data["execution_payload"]["target_binding"]
-                ),
-            ),
+            effects=effects,
+            side_effects=side_effects,
+            cost_model=cost_model,
+            confidence=confidence,
+            execution_payload=execution_payload,
             symbolic_effects=dict(data.get("symbolic_effects", {})),
         )
+
+
+def _effect_estimates_from_raw(raw: object) -> dict[str, EffectEstimate]:
+    if not isinstance(raw, Mapping):
+        raise ValueError("effect estimates must be stored as a MessagePack map")
+    estimates: dict[str, EffectEstimate] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str):
+            raise ValueError("effect estimate keys must be strings")
+        if isinstance(value, EffectEstimate):
+            estimates[key] = value
+        elif isinstance(value, Mapping):
+            estimates[key] = EffectEstimate(**dict(value))
+        else:
+            raise ValueError("effect estimate values must be MessagePack maps")
+    return estimates
+
+
+def _cost_model_from_raw(raw: object) -> CostModel:
+    if isinstance(raw, CostModel):
+        return raw
+    if not isinstance(raw, Mapping):
+        raise ValueError("cost_model must be a MessagePack map")
+    return CostModel(**dict(raw))
+
+
+def _confidence_from_raw(raw: object) -> ActionConfidence:
+    if isinstance(raw, ActionConfidence):
+        return raw
+    if not isinstance(raw, Mapping):
+        raise ValueError("confidence must be a MessagePack map")
+    return ActionConfidence(**dict(raw))
+
+
+def _target_binding_from_raw(raw: object) -> TargetBinding:
+    if isinstance(raw, TargetBinding):
+        return raw
+    if not isinstance(raw, Mapping):
+        raise ValueError("target_binding must be a MessagePack map")
+    return TargetBinding(**dict(raw))
+
+
+def _execution_payload_from_raw(raw: object) -> ExecutionPayload:
+    if isinstance(raw, ExecutionPayload):
+        return raw
+    if not isinstance(raw, Mapping):
+        raise ValueError("execution_payload must be a MessagePack map")
+    data = dict(raw)
+    return ExecutionPayload(
+        type=ExecutorType(data["type"]),
+        policy_id=data["policy_id"],
+        policy_version=data["policy_version"],
+        target_binding=_target_binding_from_raw(data["target_binding"]),
+    )
 
 
 # ── Promotion logic (§17) ─────────────────────────────────────────────────────
@@ -156,7 +208,7 @@ def promote_action(action: SynthesizedAction) -> None:
 
 
 class ActionLibrary:
-    """In-memory store for synthesized actions, with JSON persistence."""
+    """In-memory store for synthesized actions, with MessagePack persistence."""
 
     def __init__(self) -> None:
         self._actions: dict[str, SynthesizedAction] = {}
@@ -181,22 +233,27 @@ class ActionLibrary:
         return [a for a in self._actions.values() if a.lifecycle is lifecycle]
 
     def save(self, path: Path) -> None:
-        """Serialise all actions to a JSON file. Generates data, not code (§34)."""
-        data: list[dict[str, Any]] = [
-            action.to_dict() for action in self._actions.values()
-        ]
-        path.write_text(json.dumps(data, indent=2))
+        """Serialise all actions to a MessagePack file. Generates data, not code (§34)."""
+        data: list[SynthesizedAction] = list(self._actions.values())
+        with path.open("wb") as action_file:
+            msgpack.pack(data, action_file, default=pack_default, use_bin_type=True)
 
     @classmethod
     def load(cls, path: Path) -> ActionLibrary:
         library = cls()
-        raw: object = json.loads(path.read_text())
+        with path.open("rb") as action_file:
+            raw: object = msgpack.unpack(
+                action_file, raw=False, object_hook=unpack_object_hook
+            )
         if not isinstance(raw, list):
-            raise ValueError("action library file must contain a JSON list")
+            raise ValueError("action library file must contain a MessagePack list")
         raw_items = cast(list[object], raw)
         for item in raw_items:
+            if isinstance(item, SynthesizedAction):
+                library.add(item)
+                continue
             if not isinstance(item, Mapping):
-                raise ValueError("each action library entry must be a JSON object")
+                raise ValueError("each action library entry must be a MessagePack map")
             item_mapping = cast(Mapping[object, object], item)
             action_data: dict[str, Any] = {}
             for key, value in item_mapping.items():

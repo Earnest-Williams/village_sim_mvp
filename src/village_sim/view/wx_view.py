@@ -163,7 +163,7 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
             self.action_library_out_ctrl,
         )
         self._add_labeled_control(
-            controls_sizer, panel, "Replay JSON", self.replay_ctrl
+            controls_sizer, panel, "Replay MessagePack", self.replay_ctrl
         )
         controls_sizer.Add((0, 0), 1, wx.EXPAND)
 

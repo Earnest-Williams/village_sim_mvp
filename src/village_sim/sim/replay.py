@@ -1,14 +1,15 @@
-"""JSON replay/report writing."""
+"""MessagePack replay/report writing."""
 
 from __future__ import annotations
 
-import json
+import msgpack
 from pathlib import Path
 from typing import Any
 
 from village_sim.core.config import SimConfig
 from village_sim.sim.events import TickEvent
 from village_sim.sim.metrics import SimResult
+from village_sim.msgpack_codec import pack_default, unpack_object_hook
 from village_sim.sim.snapshot import WorldSnapshot
 
 
@@ -33,8 +34,19 @@ def write_run_report(
             "rain_temperature_penalty_c": config.rain_temperature_penalty_c,
             "cold_temperature_threshold_c": config.cold_temperature_threshold_c,
         },
-        "result": result.to_json_obj(),
-        "events": [event.to_json_obj() for event in events],
-        "snapshots": [snapshot.to_json_obj() for snapshot in snapshots],
+        "result": result,
+        "events": events,
+        "snapshots": snapshots,
     }
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    with path.open("wb") as report_file:
+        msgpack.pack(payload, report_file, default=pack_default, use_bin_type=True)
+
+
+def read_run_report(path: Path) -> dict[str, Any]:
+    with path.open("rb") as report_file:
+        raw: object = msgpack.unpack(
+            report_file, raw=False, object_hook=unpack_object_hook
+        )
+    if not isinstance(raw, dict):
+        raise ValueError("run report file must contain a MessagePack map")
+    return raw
