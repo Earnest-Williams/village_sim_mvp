@@ -125,14 +125,15 @@ class GlobalMemory:
 
     capacity_per_agent: int = DEFAULT_MEMORY_CAPACITY
     frame: pl.DataFrame = field(default_factory=lambda: _empty_memory_frame())
-    _pending: pl.DataFrame = field(default_factory=lambda: _empty_memory_frame())
+    _pending_dict: dict[
+        tuple[int, int, int, int], tuple[ResourceMemory, int]
+    ] = field(default_factory=dict)
     _next_order: int = 0
 
     def __post_init__(self) -> None:
         if self.capacity_per_agent <= 0:
             raise ValueError("memory capacity must be positive")
         self.frame = self.frame.cast(MEMORY_SCHEMA)
-        self._pending = self._pending.cast(MEMORY_SCHEMA)
         if not self.frame.is_empty():
             max_order: int = _require_int(self.frame.get_column(MEMORY_ORDER).max())
             self._next_order = max_order + 1
@@ -181,24 +182,45 @@ class GlobalMemory:
         return is_new
 
     def queue_memory(self, agent_id: int, memory: ResourceMemory) -> None:
-        order: int = self._existing_order(agent_id, memory.kind, memory.position)
-        if order < 0:
-            order = self._next_order
-            self._next_order += 1
-        row = _memory_rows(agent_id, [memory], [order])
-        self._pending = pl.concat([self._pending, row], how="vertical")
+        key = _memory_key(agent_id, memory.kind, memory.position)
+        pending = self._pending_dict.get(key)
+        if pending is not None:
+            order = pending[1]
+        else:
+            order = self._existing_order(agent_id, memory.kind, memory.position)
+            if order < 0:
+                order = self._next_order
+                self._next_order += 1
+        self._pending_dict[key] = (memory, order)
 
     def flush_pending(self) -> None:
-        if self._pending.is_empty():
+        if not self._pending_dict:
             return
-        combined = pl.concat([self.frame, self._pending], how="vertical")
+        rows = [
+            {
+                MEMORY_AGENT_ID: agent_id,
+                MEMORY_KIND: kind_id,
+                MEMORY_X: x,
+                MEMORY_Y: y,
+                MEMORY_CONFIDENCE: memory.confidence,
+                MEMORY_LAST_SEEN: memory.last_seen_tick,
+                MEMORY_LAST_AMOUNT: memory.last_amount,
+                MEMORY_SUCCESSFUL_USES: memory.successful_uses,
+                MEMORY_FAILED_USES: memory.failed_uses,
+                MEMORY_SEARCH_RADIUS: memory.search_radius,
+                MEMORY_ORDER: order,
+            }
+            for (agent_id, kind_id, x, y), (memory, order) in self._pending_dict.items()
+        ]
+        pending_df = pl.DataFrame(rows, schema=MEMORY_SCHEMA, orient="row")
+        combined = pl.concat([self.frame, pending_df], how="vertical")
         unique = combined.unique(
             subset=[MEMORY_AGENT_ID, MEMORY_KIND, MEMORY_X, MEMORY_Y],
             keep="last",
             maintain_order=True,
         )
         self.frame = self._enforce_capacity(unique)
-        self._pending = _empty_memory_frame()
+        self._pending_dict.clear()
 
     def get_memory(
         self, agent_id: int, kind: ResourceKind, position: Position
@@ -279,33 +301,26 @@ class GlobalMemory:
         ).select(EXPORT_MEMORY_SCHEMA.keys())
         return exported.cast(EXPORT_MEMORY_SCHEMA)
 
-    def _staged_matches(
-        self, agent_id: int, kind: ResourceKind, position: Position
-    ) -> pl.DataFrame:
-        return (
-            pl.concat([self.frame, self._pending], how="vertical")
-            .with_row_index("_row_index")
-            .filter(
-                (pl.col(MEMORY_AGENT_ID) == agent_id)
-                & (pl.col(MEMORY_KIND) == _kind_id(kind))
-                & (pl.col(MEMORY_X) == position.x)
-                & (pl.col(MEMORY_Y) == position.y)
-            )
-            .sort("_row_index")
-        )
-
     def _get_staged_memory(
         self, agent_id: int, kind: ResourceKind, position: Position
     ) -> ResourceMemory | None:
-        matches = self._staged_matches(agent_id, kind, position)
-        if matches.is_empty():
-            return None
-        return _row_to_memory(matches.row(matches.height - 1, named=True))
+        pending = self._pending_dict.get(_memory_key(agent_id, kind, position))
+        if pending is not None:
+            return pending[0]
+        return self.get_memory(agent_id, kind, position)
 
     def _existing_order(
         self, agent_id: int, kind: ResourceKind, position: Position
     ) -> int:
-        matches = self._staged_matches(agent_id, kind, position)
+        pending = self._pending_dict.get(_memory_key(agent_id, kind, position))
+        if pending is not None:
+            return pending[1]
+        matches = self.frame.filter(
+            (pl.col(MEMORY_AGENT_ID) == agent_id)
+            & (pl.col(MEMORY_KIND) == _kind_id(kind))
+            & (pl.col(MEMORY_X) == position.x)
+            & (pl.col(MEMORY_Y) == position.y)
+        )
         if matches.is_empty():
             return -1
         return _require_int(matches.get_column(MEMORY_ORDER)[-1])
@@ -522,6 +537,12 @@ def _empty_memory_frame() -> pl.DataFrame:
 
 def _kind_id(kind: ResourceKind) -> int:
     return _KIND_TO_ID[kind]
+
+
+def _memory_key(
+    agent_id: int, kind: ResourceKind, position: Position
+) -> tuple[int, int, int, int]:
+    return (agent_id, _kind_id(kind), position.x, position.y)
 
 
 def _memory_rows(
