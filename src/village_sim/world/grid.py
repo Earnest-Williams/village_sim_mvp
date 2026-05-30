@@ -1,10 +1,100 @@
-"""Grid helpers."""
+"""Vectorized world-grid buffers and coordinate helpers."""
 
 from __future__ import annotations
 
 from collections.abc import Iterator
+from dataclasses import dataclass, field
 
-from village_sim.core.types import Position
+import numpy as np
+from numpy.typing import NDArray
+
+from village_sim.core.types import Position, TerrainKind
+
+STRUCTURE_NONE: np.int32 = np.int32(0)
+STRUCTURE_FARM: np.int32 = np.int32(1)
+STRUCTURE_SHELTER: np.int32 = np.int32(2)
+STRUCTURE_WORKSHOP: np.int32 = np.int32(3)
+
+
+@dataclass(slots=True)
+class WorldGrids:
+    """Flat, cache-local grid buffers for vectorized environment mutation.
+
+    Every per-cell plane is a one-dimensional row-major NumPy array with exactly
+    ``width * height`` elements. Categorical planes use ``np.int32`` and
+    continuous planes use ``np.float32`` for RL observation throughput.
+    """
+
+    width: int
+    height: int
+    terrain_kind: NDArray[np.int32] = field(init=False)
+    structure_kind: NDArray[np.int32] = field(init=False)
+    elevation: NDArray[np.float32] = field(init=False)
+    structure_health: NDArray[np.float32] = field(init=False)
+    crop_growth: NDArray[np.float32] = field(init=False)
+    water_table: NDArray[np.float32] = field(init=False)
+
+    def __post_init__(self) -> None:
+        if self.width <= 0 or self.height <= 0:
+            raise ValueError("WorldGrids dimensions must be positive")
+        cell_count: int = self.width * self.height
+        self.terrain_kind = np.empty(cell_count, dtype=np.int32)
+        self.structure_kind = np.empty(cell_count, dtype=np.int32)
+        self.elevation = np.empty(cell_count, dtype=np.float32)
+        self.structure_health = np.empty(cell_count, dtype=np.float32)
+        self.crop_growth = np.empty(cell_count, dtype=np.float32)
+        self.water_table = np.empty(cell_count, dtype=np.float32)
+        self.reset()
+
+    @property
+    def cell_count(self) -> int:
+        """Return the number of cells in O(1)."""
+
+        return int(self.terrain_kind.size)
+
+    def reset(self) -> None:
+        """Reinitialize buffers in place without reallocating grid memory."""
+
+        self.terrain_kind.fill(np.int32(TerrainKind.GRASS))
+        self.structure_kind.fill(STRUCTURE_NONE)
+        self.elevation.fill(np.float32(0.0))
+        self.structure_health.fill(np.float32(0.0))
+        self.crop_growth.fill(np.float32(0.0))
+        self.water_table.fill(np.float32(0.35))
+
+    def copy_from_world_arrays(
+        self,
+        *,
+        terrain: NDArray[np.int64] | NDArray[np.int32],
+        elevation: NDArray[np.float64] | NDArray[np.float32],
+        water: NDArray[np.float64] | NDArray[np.float32],
+        food: NDArray[np.float64] | NDArray[np.float32],
+    ) -> None:
+        """Normalize legacy world arrays into the RL grid planes."""
+
+        if terrain.size != self.cell_count:
+            raise ValueError("terrain array size must match WorldGrids cell count")
+        if elevation.size != self.cell_count:
+            raise ValueError("elevation array size must match WorldGrids cell count")
+        if water.size != self.cell_count:
+            raise ValueError("water array size must match WorldGrids cell count")
+        if food.size != self.cell_count:
+            raise ValueError("food array size must match WorldGrids cell count")
+        np.copyto(self.terrain_kind, terrain, casting="unsafe")
+        np.copyto(self.elevation, elevation, casting="unsafe")
+        np.copyto(self.water_table, water, casting="unsafe")
+        np.copyto(self.crop_growth, food, casting="unsafe")
+        self.structure_kind.fill(STRUCTURE_NONE)
+        self.structure_health.fill(np.float32(0.0))
+
+    def unravel_indices(
+        self, indices: NDArray[np.int64] | NDArray[np.int32]
+    ) -> tuple[NDArray[np.int32], NDArray[np.int32]]:
+        """Return vectorized x/y coordinates for flat indices."""
+
+        x_coords: NDArray[np.int32] = np.asarray(indices % self.width, dtype=np.int32)
+        y_coords: NDArray[np.int32] = np.asarray(indices // self.width, dtype=np.int32)
+        return x_coords, y_coords
 
 
 def index_of(width: int, position: Position) -> int:

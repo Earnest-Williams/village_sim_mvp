@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import random
 from collections import deque
-from typing import List, Dict, Tuple, Any
+from enum import IntEnum
+
+import numpy as np
+from numpy.typing import NDArray
 
 from village_sim.agent.memory import AgentMemory, ResourceMemory
 from village_sim.agent.state import AgentState
@@ -15,8 +18,39 @@ from village_sim.core.types import (
     ResourceKind,
     TerrainKind,
 )
-from village_sim.world.grid import index_of
 from village_sim.world.world import World
+
+
+class FounderAction(IntEnum):
+    """Vectorized Founder mutation action identifiers."""
+
+    CHOP = 0
+    DIG = 1
+    PLANT = 2
+    BUILD = 3
+
+
+CHOP: np.int32 = np.int32(FounderAction.CHOP)
+DIG: np.int32 = np.int32(FounderAction.DIG)
+PLANT: np.int32 = np.int32(FounderAction.PLANT)
+BUILD: np.int32 = np.int32(FounderAction.BUILD)
+ACTION_COUNT: int = 4
+ACTION_IDS: NDArray[np.int32] = np.arange(ACTION_COUNT, dtype=np.int32)
+
+
+def normalize_action_payload(
+    action_payload: int | np.int32 | NDArray[np.int32],
+) -> NDArray[np.int32]:
+    """Return a strict int32 action payload matrix for vectorized stepping."""
+
+    payload: NDArray[np.int32] = np.asarray(action_payload, dtype=np.int32)
+    if payload.ndim == 0:
+        return payload.reshape(1, 1)
+    if payload.ndim == 1:
+        return payload.reshape(1, payload.shape[0])
+    if payload.ndim != 2:
+        raise ValueError("action payload must be a scalar, vector, or matrix")
+    return payload
 
 
 def execute_drink(
@@ -135,8 +169,6 @@ def execute_search_near(
     my: int = memory.position.y
     rad: int = memory.search_radius
 
-    min_x: int = max(0, mx - rad)
-    max_x: int = min(world.width - 1, mx + rad)
     min_y: int = max(0, my - rad)
     max_y: int = min(world.height - 1, my + rad)
 
@@ -153,7 +185,9 @@ def execute_search_near(
             visit_count: int = agent.visited_counts[idx]
             distance: int = abs(agent.position.x - x) + abs(agent.position.y - y)
             score: float = (
-                -float(visit_count) * 0.55 - float(distance) * 0.12 + rng.random() * 0.15
+                -float(visit_count) * 0.55
+                - float(distance) * 0.12
+                + rng.random() * 0.15
             )
             if score > best_score:
                 best_score = score
@@ -185,7 +219,7 @@ def choose_step_toward(
     if reachable_target is None:
         return _choose_greedy_step(agent, world, target, rng)
 
-    path: List[Position] | None = _find_path(world, agent.position, reachable_target)
+    path: list[Position] | None = _find_path(world, agent.position, reachable_target)
     if path is not None and len(path) >= 2:
         agent.path = path[1:]
         return path[1]
@@ -201,13 +235,17 @@ def _reachable_target(world: World, target: Position) -> Position | None:
     height: int = world.height
     t_idx: int = ty * width + tx
 
-    if 0 <= tx < width and 0 <= ty < height and world.terrain[t_idx] != int(TerrainKind.ROCK):
+    if (
+        0 <= tx < width
+        and 0 <= ty < height
+        and world.terrain[t_idx] != int(TerrainKind.ROCK)
+    ):
         return target
 
     best_idx: int = -1
     best_dist: float = 1_000_000.0
 
-    neighbors: List[int] = []
+    neighbors: list[int] = []
     if ty > 0:
         neighbors.append(t_idx - width)
     if ty < height - 1:
@@ -234,7 +272,7 @@ def _reachable_target(world: World, target: Position) -> Position | None:
 
 def _find_path(
     world: World, start: Position, target: Position
-) -> List[Position] | None:
+) -> list[Position] | None:
     """Find an unweighted passable-grid path with bounded breadth-first search."""
     width: int = world.width
     height: int = world.height
@@ -242,7 +280,7 @@ def _find_path(
     target_idx: int = target.y * width + target.x
 
     frontier: deque[int] = deque([start_idx])
-    came_from: Dict[int, int] = {start_idx: start_idx}
+    came_from: dict[int, int] = {start_idx: start_idx}
     expansions: int = 0
     max_expansions: int = min(width * height, 2_000)
 
@@ -255,7 +293,7 @@ def _find_path(
         cx: int = current_idx % width
         cy: int = current_idx // width
 
-        neighbors: List[int] = []
+        neighbors: list[int] = []
         if cy > 0:
             neighbors.append(current_idx - width)
         if cy < height - 1:
@@ -277,12 +315,12 @@ def _find_path(
 
 
 def _reconstruct_path(
-    came_from: Dict[int, int],
+    came_from: dict[int, int],
     current_idx: int,
     start_idx: int,
     width: int,
-) -> List[Position]:
-    path_indices: List[int] = [current_idx]
+) -> list[Position]:
+    path_indices: list[int] = [current_idx]
     while current_idx != start_idx:
         current_idx = came_from[current_idx]
         path_indices.append(current_idx)
@@ -308,7 +346,7 @@ def _choose_greedy_step(
     best_idx: int = -1
     best_score: float = -1_000_000.0
 
-    neighbors: List[int] = []
+    neighbors: list[int] = []
     if cy > 0:
         neighbors.append(current_idx - width)
     if cy < height - 1:
@@ -327,9 +365,7 @@ def _choose_greedy_step(
         cost: float = float(world.movement_costs[n_idx])
         h_delta: float = max(0.0, float(world.height_map[n_idx]) - current_height)
 
-        score: float = (
-            (current_distance - dist) * 4.0 - cost * 0.35 - h_delta * 1.6
-        )
+        score: float = (current_distance - dist) * 4.0 - cost * 0.35 - h_delta * 1.6
         score += rng.random() * 0.03
 
         if score > best_score:
@@ -356,7 +392,7 @@ def choose_exploration_step(
     best_idx: int = -1
     best_score: float = -1_000_000.0
 
-    neighbors: List[int] = []
+    neighbors: list[int] = []
     if cy > 0:
         neighbors.append(current_idx - width)
     if cy < height - 1:

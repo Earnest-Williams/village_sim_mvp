@@ -6,6 +6,9 @@ import msgpack
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
+from numpy.typing import NDArray
+
 from village_sim.msgpack_codec import pack_default, unpack_object_hook
 from village_sim.orchestrator.symbolic import FactValue
 
@@ -119,3 +122,68 @@ def _is_msgpack_value(value: object) -> bool:
             for key, item in value.items()
         )
     return False
+
+
+FounderKnowledgePayload = dict[str, NDArray[np.float32]]
+
+
+def save_founder_knowledge(
+    payload: FounderKnowledgePayload,
+    path: Path,
+) -> None:
+    """Serialize finalized Founder policy/heuristic arrays to MessagePack."""
+
+    packed_payload: dict[str, dict[str, object]] = {}
+    for name, array in payload.items():
+        if not isinstance(name, str):
+            raise ValueError("Founder knowledge keys must be strings")
+        normalized: NDArray[np.float32] = np.asarray(array, dtype=np.float32)
+        packed_payload[name] = {
+            "dtype": "float32",
+            "shape": tuple(int(axis) for axis in normalized.shape),
+            "data": normalized.tobytes(order="C"),
+        }
+    with path.open("wb") as knowledge_file:
+        msgpack.pack(packed_payload, knowledge_file, use_bin_type=True)
+
+
+def load_founder_knowledge(path: Path) -> FounderKnowledgePayload:
+    """Load Founder policy/heuristic arrays from a MessagePack file."""
+
+    with path.open("rb") as knowledge_file:
+        raw: object = msgpack.unpack(knowledge_file, raw=False)
+    if not isinstance(raw, dict):
+        raise ValueError("Founder knowledge file must contain a MessagePack object")
+
+    payload: FounderKnowledgePayload = {}
+    for key, value in raw.items():
+        if not isinstance(key, str):
+            raise ValueError("Founder knowledge keys must be strings")
+        if not isinstance(value, dict):
+            raise ValueError("Founder knowledge entries must be MessagePack objects")
+        dtype_value: object = value.get("dtype")
+        shape_value: object = value.get("shape")
+        data_value: object = value.get("data")
+        if dtype_value != "float32":
+            raise ValueError("Founder knowledge arrays must use float32 dtype")
+        if not isinstance(shape_value, list):
+            raise ValueError("Founder knowledge shape must be a MessagePack array")
+        if not isinstance(data_value, bytes):
+            raise ValueError("Founder knowledge data must be bytes")
+        shape: tuple[int, ...] = tuple(
+            _validate_shape_axis(axis) for axis in shape_value
+        )
+        array: NDArray[np.float32] = np.frombuffer(data_value, dtype=np.float32).copy()
+        expected_size: int = int(np.prod(shape, dtype=np.int64))
+        if array.size != expected_size:
+            raise ValueError("Founder knowledge data size does not match shape")
+        payload[key] = array.reshape(shape)
+    return payload
+
+
+def _validate_shape_axis(axis: object) -> int:
+    if not isinstance(axis, int):
+        raise ValueError("Founder knowledge shape axes must be integers")
+    if axis < 0:
+        raise ValueError("Founder knowledge shape axes must be non-negative")
+    return axis

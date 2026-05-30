@@ -9,6 +9,7 @@ from time import perf_counter
 import numpy as np
 from numpy.typing import NDArray
 
+from village_sim.agent.actions import BUILD, CHOP, DIG, PLANT, normalize_action_payload
 from village_sim.agent.decision import DecisionSource
 from village_sim.agent.memory import (
     AgentMemory,
@@ -42,6 +43,7 @@ from village_sim.core.types import (
     Position,
     PrimitiveAction,
     ResourceKind,
+    TerrainKind,
 )
 from village_sim.goap.executor import ExecutionResult, PlanExecutor
 from village_sim.goap.planner import PlanStep, plan
@@ -72,7 +74,7 @@ from village_sim.world.discoverables import (
     make_initial_discoverables,
     update_discoverable_memory,
 )
-from village_sim.world.grid import index_of
+from village_sim.world.grid import STRUCTURE_SHELTER, WorldGrids, index_of
 from village_sim.world.weather import (
     COLD_REASON_DAY,
     COLD_REASON_NIGHT,
@@ -1044,3 +1046,212 @@ class Simulation:
                 y=position.y,
             )
         )
+
+
+FounderObservation = NDArray[np.float32]
+FounderInfo = dict[str, int | float]
+FounderStepResult = tuple[FounderObservation, float, bool, bool, FounderInfo]
+FounderResetResult = tuple[FounderObservation, FounderInfo]
+
+
+class FounderTrainingEnv:
+    """Gymnasium-compatible vectorized Founder training environment.
+
+    The class intentionally implements the Env protocol without importing
+    gymnasium at module import time, keeping the core simulator usable in lean
+    runtime deployments while preserving Ray RLlib's reset/step tuple contract.
+    """
+
+    metadata: dict[str, object] = {"render_modes": ()}
+
+    def __init__(
+        self,
+        *,
+        width: int,
+        height: int,
+        max_steps: int,
+        seed: int,
+        receptive_field: int,
+    ) -> None:
+        if receptive_field <= 0 or receptive_field % 2 == 0:
+            raise ValueError("receptive_field must be a positive odd integer")
+        if max_steps <= 0:
+            raise ValueError("max_steps must be positive")
+        self.width = width
+        self.height = height
+        self.max_steps = max_steps
+        self.receptive_field = receptive_field
+        self._radius = receptive_field // 2
+        self.grids = WorldGrids(width=width, height=height)
+        self._rng = np.random.default_rng(seed)
+        self._seed: int = seed
+        self._tick: int = 0
+        self._agent_x: np.int32 = np.int32(width // 2)
+        self._agent_y: np.int32 = np.int32(height // 2)
+        self._obs: FounderObservation = np.empty(
+            (6, receptive_field, receptive_field), dtype=np.float32
+        )
+        self._padded: FounderObservation = np.empty(
+            (6, height + receptive_field - 1, width + receptive_field - 1),
+            dtype=np.float32,
+        )
+        self.reset(seed=seed)
+
+    def reset(
+        self,
+        *,
+        seed: int | None = None,
+        options: dict[str, object] | None = None,
+    ) -> FounderResetResult:
+        """Reset grid buffers in place and return the initial local tensor."""
+
+        del options
+        if seed is not None:
+            self._seed = seed
+            self._rng = np.random.default_rng(seed)
+        self._tick = 0
+        self.grids.reset()
+        random_values: NDArray[np.float32] = self._rng.random(
+            self.grids.cell_count, dtype=np.float32
+        )
+        forest_mask: NDArray[np.bool_] = random_values > np.float32(0.72)
+        water_mask: NDArray[np.bool_] = random_values < np.float32(0.08)
+        hill_mask: NDArray[np.bool_] = (
+            random_values >= np.float32(0.55)
+        ) & ~forest_mask
+        self.grids.terrain_kind[forest_mask] = np.int32(TerrainKind.FOREST)
+        self.grids.terrain_kind[water_mask] = np.int32(TerrainKind.WATER)
+        self.grids.terrain_kind[hill_mask] = np.int32(TerrainKind.HILL)
+        self.grids.elevation[:] = random_values
+        self.grids.water_table[:] = np.where(
+            water_mask,
+            np.float32(0.9),
+            np.float32(0.25) + random_values * np.float32(0.25),
+        ).astype(np.float32)
+        self.grids.crop_growth.fill(np.float32(0.0))
+        self.grids.structure_kind.fill(np.int32(0))
+        self.grids.structure_health.fill(np.float32(0.0))
+        self._agent_x = np.int32(self.width // 2)
+        self._agent_y = np.int32(self.height // 2)
+        return self._observation(), self._info(np.float32(0.0))
+
+    def step(
+        self, action_array: int | np.int32 | NDArray[np.int32]
+    ) -> FounderStepResult:
+        """Apply vectorized environmental mutations and return an RLlib tuple."""
+
+        actions: NDArray[np.int32] = normalize_action_payload(action_array)
+        if actions.shape[1] >= 3:
+            action_kind: NDArray[np.int32] = actions[:, 0]
+            x_coords: NDArray[np.int32] = np.asarray(
+                np.clip(actions[:, 1], 0, self.width - 1), dtype=np.int32
+            )
+            y_coords: NDArray[np.int32] = np.asarray(
+                np.clip(actions[:, 2], 0, self.height - 1), dtype=np.int32
+            )
+        else:
+            action_kind = actions[:, 0]
+            x_coords = np.full(actions.shape[0], self._agent_x, dtype=np.int32)
+            y_coords = np.full(actions.shape[0], self._agent_y, dtype=np.int32)
+
+        indices: NDArray[np.int32] = y_coords * np.int32(self.width) + x_coords
+        terrain: NDArray[np.int32] = self.grids.terrain_kind[indices]
+        structure: NDArray[np.int32] = self.grids.structure_kind[indices]
+
+        chop_mask: NDArray[np.bool_] = (action_kind == CHOP) & (
+            terrain == np.int32(TerrainKind.FOREST)
+        )
+        dig_mask: NDArray[np.bool_] = (action_kind == DIG) & (
+            terrain != np.int32(TerrainKind.ROCK)
+        )
+        plant_mask: NDArray[np.bool_] = (action_kind == PLANT) & (
+            terrain == np.int32(TerrainKind.GRASS)
+        )
+        build_mask: NDArray[np.bool_] = (action_kind == BUILD) & (structure == 0)
+
+        self.grids.terrain_kind[indices[chop_mask]] = np.int32(TerrainKind.GRASS)
+        self.grids.water_table[indices[dig_mask]] = np.minimum(
+            np.float32(1.0),
+            self.grids.water_table[indices[dig_mask]] + np.float32(0.18),
+        )
+        self.grids.crop_growth[indices[plant_mask]] = np.maximum(
+            self.grids.crop_growth[indices[plant_mask]], np.float32(0.25)
+        )
+        self.grids.structure_kind[indices[build_mask]] = STRUCTURE_SHELTER
+        self.grids.structure_health[indices[build_mask]] = np.float32(1.0)
+        self.grids.crop_growth[:] = np.minimum(
+            np.float32(1.0), self.grids.crop_growth + np.float32(0.01)
+        )
+
+        reward_value: np.float32 = np.float32(
+            chop_mask.sum(dtype=np.int32) * np.int32(1)
+            + dig_mask.sum(dtype=np.int32) * np.int32(2)
+            + plant_mask.sum(dtype=np.int32) * np.int32(2)
+            + build_mask.sum(dtype=np.int32) * np.int32(3)
+        )
+        if actions.shape[0] > 0:
+            self._agent_x = np.int32(x_coords[-1])
+            self._agent_y = np.int32(y_coords[-1])
+        self._tick += 1
+        terminated: bool = bool(self._mission_complete())
+        truncated: bool = self._tick >= self.max_steps
+        return (
+            self._observation(),
+            float(reward_value),
+            terminated,
+            truncated,
+            self._info(reward_value),
+        )
+
+    def _mission_complete(self) -> bool:
+        farm_count: int = int(np.count_nonzero(self.grids.crop_growth >= 1.0))
+        shelter_count: int = int(np.count_nonzero(self.grids.structure_kind > 0))
+        water_count: int = int(np.count_nonzero(self.grids.water_table >= 0.85))
+        return farm_count >= 3 and shelter_count >= 1 and water_count >= 1
+
+    def _observation(self) -> FounderObservation:
+        terrain_plane: NDArray[np.float32] = self.grids.terrain_kind.reshape(
+            self.height, self.width
+        ).astype(np.float32, copy=False)
+        structure_plane: NDArray[np.float32] = self.grids.structure_kind.reshape(
+            self.height, self.width
+        ).astype(np.float32, copy=False)
+        elevation_plane: NDArray[np.float32] = self.grids.elevation.reshape(
+            self.height, self.width
+        )
+        health_plane: NDArray[np.float32] = self.grids.structure_health.reshape(
+            self.height, self.width
+        )
+        crop_plane: NDArray[np.float32] = self.grids.crop_growth.reshape(
+            self.height, self.width
+        )
+        water_plane: NDArray[np.float32] = self.grids.water_table.reshape(
+            self.height, self.width
+        )
+        self._padded.fill(np.float32(0.0))
+        y_start: int = self._radius
+        y_end: int = y_start + self.height
+        x_start: int = self._radius
+        x_end: int = x_start + self.width
+        self._padded[0, y_start:y_end, x_start:x_end] = terrain_plane
+        self._padded[1, y_start:y_end, x_start:x_end] = structure_plane
+        self._padded[2, y_start:y_end, x_start:x_end] = elevation_plane
+        self._padded[3, y_start:y_end, x_start:x_end] = health_plane
+        self._padded[4, y_start:y_end, x_start:x_end] = crop_plane
+        self._padded[5, y_start:y_end, x_start:x_end] = water_plane
+        crop_y: int = int(self._agent_y)
+        crop_x: int = int(self._agent_x)
+        self._obs[:] = self._padded[
+            :,
+            crop_y : crop_y + self.receptive_field,
+            crop_x : crop_x + self.receptive_field,
+        ]
+        return self._obs.copy()
+
+    def _info(self, reward_value: np.float32) -> FounderInfo:
+        return {
+            "tick": self._tick,
+            "agent_x": int(self._agent_x),
+            "agent_y": int(self._agent_y),
+            "reward": float(reward_value),
+        }
