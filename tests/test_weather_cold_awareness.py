@@ -201,6 +201,8 @@ class TestWeatherColdAwareness(unittest.TestCase):
             write_run_report(replay_path, config, result, sim.events, sim.snapshots)
             payload: dict[str, Any] = read_run_report(replay_path)
 
+        self.assertEqual(payload["schema_version"], 2)
+        self.assertEqual(payload["config"]["initial_agents"], config.initial_agents)
         replay_snapshot = payload["snapshots"][0]
         self.assertTrue(hasattr(replay_snapshot, "temperature_c"))
         self.assertTrue(hasattr(replay_snapshot, "feels_cold"))

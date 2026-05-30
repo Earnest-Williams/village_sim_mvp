@@ -22,7 +22,7 @@ def write_run_report(
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "config": {
             "width": config.width,
             "height": config.height,

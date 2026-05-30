@@ -173,7 +173,8 @@ class Simulation:
         self.config.validate()
         if self.config.initial_agents > self.max_agents:
             raise ValueError(
-                "initial_agents must be less than or equal to "
+                "initial_agents "
+                f"({self.config.initial_agents}) must be less than or equal to "
                 f"max_agents ({self.max_agents})"
             )
         self.rng = random.Random(self.config.seed)
