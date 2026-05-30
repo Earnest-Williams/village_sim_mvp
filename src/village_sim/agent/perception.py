@@ -70,7 +70,9 @@ def _extract_visible_resources_kernel(
                 tile_index: int = tile_y * world_width + tile_x
 
                 water_amount: float = water_grid[tile_index]
-                if water_amount >= water_threshold and count < max_sightings:
+                if water_amount >= water_threshold:
+                    if count >= max_sightings:
+                        return count
                     out_agent_ids[count] = agent_id
                     out_tile_indices[count] = tile_index
                     out_kinds[count] = RESOURCE_KIND_WATER
@@ -78,7 +80,9 @@ def _extract_visible_resources_kernel(
                     count += 1
 
                 food_amount: float = food_grid[tile_index]
-                if food_amount >= food_threshold and count < max_sightings:
+                if food_amount >= food_threshold:
+                    if count >= max_sightings:
+                        return count
                     out_agent_ids[count] = agent_id
                     out_tile_indices[count] = tile_index
                     out_kinds[count] = RESOURCE_KIND_FOOD
