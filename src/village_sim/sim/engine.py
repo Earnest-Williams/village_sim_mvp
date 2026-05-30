@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
+from time import perf_counter
 
 from village_sim.agent.decision import DecisionSource
 from village_sim.agent.memory import (
@@ -36,6 +37,7 @@ from village_sim.sim.event_summary import (
 )
 from village_sim.sim.events import TickEvent
 from village_sim.sim.metrics import LearningStats, SimResult
+from village_sim.sim.profile import SimulationTimings, TimingCategory
 from village_sim.sim.snapshot import AgentSnapshot, WorldSnapshot
 from village_sim.view.ascii_view import render_ascii_map
 from village_sim.world.discoverables import (
@@ -78,6 +80,7 @@ class Simulation:
     """
 
     config: SimConfig
+    profiler: SimulationTimings | None = None
     rng: random.Random = field(init=False)
     world: World = field(init=False)
     agent: AgentState = field(init=False)
@@ -136,6 +139,7 @@ class Simulation:
         if self.tick >= self.config.max_ticks():
             return
 
+        environment_start: float = perf_counter()
         clock: SimClock = clock_from_tick(self.tick, self.config)
         raining: bool = self.world.step_environment(
             self.rng, self.config, clock.tick_of_day
@@ -149,6 +153,7 @@ class Simulation:
         if raining and self.tick % 12 == 0:
             self._log("weather", "rain fell")
         self._log_weather_transition(weather)
+        self._record_timing("environment", perf_counter() - environment_start)
 
         if self.agent.alive:
             self._step_agent(clock, weather)
@@ -159,8 +164,13 @@ class Simulation:
         while self.tick < self.config.max_ticks() and self.agent.alive:
             self.step()
             if snapshot_every > 0 and self.tick % snapshot_every == 0:
+                snapshot_start: float = perf_counter()
                 self.snapshots.append(self.snapshot(include_ascii=True))
-        return self.result()
+                self._record_timing("snapshots", perf_counter() - snapshot_start)
+        aggregation_start: float = perf_counter()
+        result = self.result()
+        self._record_timing("result_aggregation", perf_counter() - aggregation_start)
+        return result
 
     def result(self) -> SimResult:
         days_elapsed: float = self.tick / float(self.config.ticks_per_day)
@@ -276,6 +286,7 @@ class Simulation:
         )
 
     def _step_agent(self, clock: SimClock, weather: WeatherState) -> None:
+        perception_start: float = perf_counter()
         self.agent.ensure_visit_buffer(self.world.width * self.world.height)
         position_index: int = index_of(self.world.width, self.agent.position)
         self.agent.visited_counts[position_index] += 1
@@ -332,17 +343,23 @@ class Simulation:
             if item is not None:
                 item.discovered = True
             self._log("memory", f"discovered {discoverable_id}")
+        self._record_timing("perception", perf_counter() - perception_start)
 
         if self.config.enable_goap_control:
+            goap_start: float = perf_counter()
             goal = self._urgent_goap_goal()
             if goal is not None:
                 results = self.execute_goap_plan(goal)
+                self._record_timing("goap", perf_counter() - goap_start)
                 if results and all(result.success for result in results):
                     self._sync_memory_markers()
                     if not self.agent.alive:
                         self._log_agent_death()
                     return
+            else:
+                self._record_timing("goap", perf_counter() - goap_start)
 
+        policy_start: float = perf_counter()
         interaction_ticks = self._try_record_discoverable_exploitation(
             clock, observation
         )
@@ -358,6 +375,7 @@ class Simulation:
             self._log_cold_status_transition()
             self._advance_interaction_ticks(interaction_ticks)
             self._sync_memory_markers()
+            self._record_timing("policy_pathing", perf_counter() - policy_start)
             if not self.agent.alive:
                 self._log_agent_death()
             return
@@ -392,6 +410,7 @@ class Simulation:
             is_cold_exposed=weather.feels_cold,
         )
         self._log_cold_status_transition()
+        self._record_timing("policy_pathing", perf_counter() - policy_start)
         if not self.agent.alive:
             self._log_agent_death()
 
@@ -410,6 +429,7 @@ class Simulation:
         if not self._should_exploit_discoverable(item):
             return 0
 
+        snapshot_start: float = perf_counter()
         before_snapshot = make_state_snapshot(
             tick=self.tick,
             agent=self.agent,
@@ -417,6 +437,7 @@ class Simulation:
             discoverable_memory=self.discoverable_memory,
             clock=clock,
         )
+        self._record_timing("snapshots", perf_counter() - snapshot_start)
         if item.kind is DiscoverableKind.CAVE:
             self._log(
                 "action", f"{SEEKING_SHELTER_ACTION_PREFIX}{item.discoverable_id}"
@@ -446,6 +467,7 @@ class Simulation:
             after_observation.discoverables,
             after_tick,
         )
+        snapshot_start = perf_counter()
         after_snapshot = make_state_snapshot(
             tick=after_tick,
             agent=self.agent,
@@ -453,6 +475,7 @@ class Simulation:
             discoverable_memory=self.discoverable_memory,
             clock=clock,
         )
+        self._record_timing("snapshots", perf_counter() - snapshot_start)
         task_name: str = item.satisfies_need
         primitive_action: PrimitiveAction = PrimitiveAction.WAIT
         if item.satisfies_need == "thirst":
@@ -494,6 +517,7 @@ class Simulation:
         extra_ticks: int = max(0, interaction_ticks - 1)
         while extra_ticks > 0 and self.tick < self.config.max_ticks() - 1:
             self.tick += 1
+            environment_start: float = perf_counter()
             busy_clock: SimClock = clock_from_tick(self.tick, self.config)
             raining: bool = self.world.step_environment(
                 self.rng, self.config, busy_clock.tick_of_day
@@ -507,6 +531,7 @@ class Simulation:
             if raining and self.tick % 12 == 0:
                 self._log("weather", "rain fell")
             self._log_weather_transition(weather)
+            self._record_timing("environment", perf_counter() - environment_start)
             update_needs(
                 self.agent,
                 self.config,
@@ -519,6 +544,10 @@ class Simulation:
             extra_ticks -= 1
             if not self.agent.alive:
                 return
+
+    def _record_timing(self, category: TimingCategory, seconds: float) -> None:
+        if self.profiler is not None:
+            self.profiler.add(category, seconds)
 
     def _log_weather_transition(self, weather: WeatherState) -> None:
         if weather.feels_cold and not self._last_feels_cold:
