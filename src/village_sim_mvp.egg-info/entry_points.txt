@@ -1,0 +1,3 @@
+[console_scripts]
+village-sim = village_sim.run:main
+village-sim-gui = village_sim.view.wx_view:main
