@@ -16,6 +16,8 @@ STC_ROLE_STYLE: dict[str, int] = {
     "summary": 1,
     "agent": 2,
     "agent_sleeping": 3,
+    "agent_other": 14,
+    "agent_crowd": 15,
     "water": 4,
     "broadleaf": 5,
     "evergreen": 6,

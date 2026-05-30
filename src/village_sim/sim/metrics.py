@@ -78,6 +78,26 @@ class SimResult:
     remembered_food_sites: int
     initial_agents: int = 1
     final_active_agents: int = 1
+    dead_agents: int = 0
+    active_average_health: float = 0.0
+    active_average_thirst: float = 0.0
+    active_average_hunger: float = 0.0
+    active_average_fatigue: float = 0.0
+    active_average_cold_stress: float = 0.0
+    all_average_health: float = 0.0
+    all_average_thirst: float = 0.0
+    all_average_hunger: float = 0.0
+    all_average_fatigue: float = 0.0
+    all_average_cold_stress: float = 0.0
+    total_distance_walked: int = 0
+    average_distance_walked: float = 0.0
+    deaths_by_reason: dict[str, int] = field(default_factory=dict)
+    total_water_memories: int = 0
+    total_food_memories: int = 0
+    total_memory_directed_decisions: int = 0
+    total_exploration_directed_decisions: int = 0
+    total_shelter_events: int = 0
+    total_cold_events: int = 0
     learning: LearningStats = field(default_factory=LearningStats)
     best_water_memory_x: int = -1
     best_water_memory_y: int = -1
