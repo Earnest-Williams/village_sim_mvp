@@ -12,6 +12,7 @@ src/village_sim/agent/memory.py
 src/village_sim/agent/needs.py
 src/village_sim/agent/perception.py
 src/village_sim/agent/policy.py
+src/village_sim/agent/social.py
 src/village_sim/agent/state.py
 src/village_sim/core/__init__.py
 src/village_sim/core/config.py
@@ -63,6 +64,7 @@ tests/test_cli_help.py
 tests/test_cold_shelter.py
 tests/test_cold_weather_polish.py
 tests/test_discoverables.py
+tests/test_founder_vectorized_env.py
 tests/test_goap_end_to_end.py
 tests/test_goap_planner.py
 tests/test_knowledge.py
@@ -73,6 +75,7 @@ tests/test_mvp_loop.py
 tests/test_orchestrator.py
 tests/test_runtime_discoverables.py
 tests/test_simulation.py
+tests/test_social.py
 tests/test_state_arrays.py
 tests/test_stc_map.py
 tests/test_water_system.py

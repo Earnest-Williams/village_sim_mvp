@@ -15,9 +15,9 @@ Requires-Dist: wxPython>=4.2; extra == "gui"
 
 # Village Sim MVP
 
-A Python-only, headless-first survival simulation MVP for a low-graphics medieval village simulator.
+A headless-first survival simulation MVP for a low-graphics medieval village simulator.
 
-This version keeps the simulation core lightweight and uses MessagePack for binary persistence. It is designed to be easy to migrate later to NumPy, Numba, Mojo, Rust, Godot, Bevy, or another renderer/training system.
+This version keeps the simulation core lightweight and uses MessagePack for binary persistence. The runtime now uses typed, data-oriented NumPy-backed state buffers with optional Numba acceleration and is designed to be easy to migrate later to Mojo, Rust, Godot, Bevy, or another renderer/training system.
 
 ## What this MVP includes
 
@@ -27,9 +27,15 @@ This version keeps the simulation core lightweight and uses MessagePack for bina
 - One survival agent with thirst, hunger, fatigue, health, perception, and memory.
 - Utility-style policy for drinking, eating, sleeping, exploring, and searching remembered locations.
 - Resource memory with confidence and staleness.
+- Deterministic cold-weather model with shelter awareness, cave sheltering behavior, and cold-status event tracking.
+- Seeded discoverables (`spring_001`, `berry_bush_001`, `cave_001`) plus discoverable memory.
+- Bounded GOAP planning/execution for urgent discoverable needs with utility-policy fallback.
+- Trajectory recording plus in-memory action synthesis and persisted action-library I/O.
 - Headless deterministic simulation from seed and config.
 - ASCII debug map.
+- wxPython GUI with semantic colored glyph rendering and stable scrolling during live updates.
 - MessagePack run output with metrics, events, and optional snapshots.
+- Benchmark runner with timing split categories (`environment`, `perception`, `policy/pathing`, `goap`, `snapshots`, `result aggregation`).
 - Unit tests using `unittest`.
 
 ## Run without installing
@@ -56,6 +62,12 @@ Run several seeds:
 
 ```bash
 PYTHONPATH=src python -m village_sim --batch 25 --days 10 --width 32 --height 32
+```
+
+Run with discoverables + GOAP:
+
+```bash
+PYTHONPATH=src python -m village_sim --seed 1 --days 2 --width 32 --height 32 --discoverables --goap --print-map
 ```
 
 
@@ -115,6 +127,12 @@ village-sim --seed 1 --days 30 --print-map
 
 ```bash
 PYTHONPATH=src python -m unittest discover -s tests
+```
+
+## Run benchmark
+
+```bash
+PYTHONPATH=src python -m village_sim.bench --seeds 10 --days 2 --width 32 --height 32
 ```
 
 ## Migration principles

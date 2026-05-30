@@ -154,10 +154,6 @@ class Simulation:
         default=None, init=False
     )
     _last_memory_decision_tick: int = field(default=-1_000_000, init=False)
-    _perception_agent_ids: NDArray[np.int64] = field(init=False)
-    _perception_agent_x: NDArray[np.int32] = field(init=False)
-    _perception_agent_y: NDArray[np.int32] = field(init=False)
-    _perception_agent_alive: NDArray[np.bool_] = field(init=False)
     _perception_out_agent_ids: NDArray[np.int64] = field(init=False)
     _perception_out_tile_indices: NDArray[np.int64] = field(init=False)
     _perception_out_kinds: NDArray[np.int32] = field(init=False)
@@ -203,10 +199,6 @@ class Simulation:
         self._log_weather_transition(self.current_weather)
 
     def _init_perception_buffers(self) -> None:
-        self._perception_agent_ids = np.arange(MAX_AGENTS, dtype=np.int64)
-        self._perception_agent_x = np.empty(MAX_AGENTS, dtype=np.int32)
-        self._perception_agent_y = np.empty(MAX_AGENTS, dtype=np.int32)
-        self._perception_agent_alive = np.empty(MAX_AGENTS, dtype=np.bool_)
         radius: int = max(
             self.config.vision_radius_day,
             self.config.vision_radius_night,
@@ -247,7 +239,7 @@ class Simulation:
         ).astype(np.float32)
         self.action_knowledge_frame = seed_agent_action_knowledge(
             self.action_knowledge_frame,
-            0,
+            self.agent.agent_id,
             free_slots,
             perturbations,
         )

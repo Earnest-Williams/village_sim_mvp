@@ -374,5 +374,8 @@ def transfer_action_knowledge(
         return frame
 
     keys: list[str] = [ACTION_AGENT_ID, ACTION_ID, ACTION_POLICY_ID]
+    candidates = candidates.with_columns(
+        pl.col(ACTION_CONFIDENCE).cast(frame.schema[ACTION_CONFIDENCE]),
+    )
     retained: pl.DataFrame = frame.join(candidates.select(keys), on=keys, how="anti")
-    return pl.concat([retained, candidates], how="vertical_relaxed").sort(keys)
+    return pl.concat([retained, candidates], how="vertical").sort(keys)
