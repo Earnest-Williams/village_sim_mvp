@@ -50,6 +50,25 @@ class SimConfig:
     downhill_flow_fraction: float = 0.18
     min_flow_water: float = 0.020
 
+    rain_event_start_chance_per_tick: float = 0.010
+    drizzle_event_weight: float = 0.35
+    downpour_event_weight: float = 0.15
+    drizzle_sample_fraction: float = 0.004
+    rain_sample_fraction: float = 0.020
+    downpour_sample_fraction: float = 0.080
+    max_surface_water_depth: float = 7.0
+    surface_water_active_threshold: float = 0.05
+    shallow_water_threshold: float = 0.20
+    shallow_evaporation: float = 0.03
+    wetness_decay: float = 0.05
+    surface_infiltration_per_fluid_tick: float = 0.05
+    water_height_scale: float = 0.025
+    sideways_height_slop: float = 0.010
+    sideways_min_depth_difference: float = 0.05
+    sideways_spread_fraction: float = 0.25
+    flood_spill_fraction: float = 0.50
+    off_map_drain_rate: float = 0.25
+
     food_regrowth_per_tick: float = 0.0007
     max_food_per_cell: float = 1.0
 

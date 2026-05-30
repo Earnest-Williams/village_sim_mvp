@@ -9,8 +9,16 @@ from village_sim.core.config import SimConfig
 from village_sim.core.types import Position, TerrainKind
 from village_sim.world.discoverables import Discoverable, update_discoverables_daily
 from village_sim.world.grid import index_of, iter_neighbor_positions, iter_positions
-from village_sim.world.hydrology import step_hydrology
 from village_sim.world.resources import initialize_food, initialize_water, regrow_food
+from village_sim.world.water_system import (
+    RainEvent,
+    RainSystem,
+    WaterSystemState,
+    build_water_system_state,
+    step_active_water_flow,
+    step_sampled_rain,
+    step_water_maintenance_bank,
+)
 from village_sim.world.terrain import (
     carve_stream,
     classify_terrain,
@@ -18,6 +26,10 @@ from village_sim.world.terrain import (
     estimate_slope,
     walk_cost,
 )
+
+
+def _new_discoverables() -> dict[str, Discoverable]:
+    return {}
 
 
 @dataclass(slots=True)
@@ -35,9 +47,19 @@ class World:
     water: list[float]
     food: list[float]
     food_capacity: list[float]
-    discoverables: dict[str, Discoverable] = field(default_factory=dict)
+    water_system: WaterSystemState = field(init=False)
+    rain_system: RainSystem = field(default_factory=RainSystem)
+    discoverables: dict[str, Discoverable] = field(default_factory=_new_discoverables)
     seed: int = 0
     tile_size_meters: float = 2.0
+
+    def __post_init__(self) -> None:
+        self.water_system = build_water_system_state(
+            width=self.width,
+            height=self.height,
+            terrain=self.terrain,
+            water=self.water,
+        )
 
     def index(self, position: Position) -> int:
         return index_of(self.width, position)
@@ -86,21 +108,34 @@ class World:
         return walk_cost(self.terrain[index], slope)
 
     def step_environment(
-        self, rng: random.Random, config: SimConfig, tick_of_day: int = -1
+        self, rng: random.Random, config: SimConfig, tick: int = -1
     ) -> bool:
-        raining: bool = step_hydrology(
-            self.width,
-            self.height,
-            self.height_map,
-            self.terrain,
-            self.water,
-            rng,
-            config,
+        event: RainEvent | None = self.rain_system.tick(rng, config)
+        rain_tick: int = max(0, tick)
+        if event is not None and event.should_apply(rain_tick):
+            step_sampled_rain(
+                rng=rng,
+                water=self.water,
+                state=self.water_system,
+                event=event,
+                config=config,
+            )
+        step_active_water_flow(
+            water=self.water,
+            height_map=self.height_map,
+            state=self.water_system,
+            config=config,
+        )
+        step_water_maintenance_bank(
+            tick=rain_tick,
+            water=self.water,
+            state=self.water_system,
+            config=config,
         )
         regrow_food(self.width, self.height, self.food, self.food_capacity, config)
-        if tick_of_day == 0:
+        if tick >= 0 and rain_tick % config.ticks_per_day == 0:
             update_discoverables_daily(self)
-        return raining
+        return event is not None and event.is_raining
 
     def nearest_drinkable_position(self, position: Position) -> Position | None:
         if self.water_at(position) >= 0.20:
