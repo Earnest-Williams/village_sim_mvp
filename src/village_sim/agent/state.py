@@ -4,7 +4,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from village_sim.core.types import ActionKind, DeathReason, GoalKind, Position
+from village_sim.agent.decision import DecisionTrace
+from village_sim.core.types import (
+    ActionKind,
+    DeathReason,
+    GoalKind,
+    Position,
+    ResourceKind,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryMarker:
+    """Read-only resource memory marker exposed to renderers."""
+
+    position: Position
+    kind: ResourceKind
+    confidence: float
 
 
 @dataclass(slots=True)
@@ -29,6 +45,8 @@ class AgentState:
     water_discoveries: int = 0
     food_discoveries: int = 0
     visited_counts: list[int] = field(default_factory=list)
+    decision_trace: DecisionTrace = field(default_factory=DecisionTrace)
+    memory_markers: list[MemoryMarker] = field(default_factory=list)
 
     def ensure_visit_buffer(self, world_size: int) -> None:
         if len(self.visited_counts) != world_size:

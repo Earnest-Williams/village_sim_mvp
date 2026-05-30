@@ -5,14 +5,19 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass, field
 
-from village_sim.agent.memory import AgentMemory, DiscoverableAgentMemory
+from village_sim.agent.decision import DecisionSource
+from village_sim.agent.memory import (
+    AgentMemory,
+    DiscoverableAgentMemory,
+    ResourceMemory,
+)
 from village_sim.agent.needs import update_needs
 from village_sim.agent.perception import Observation, perceive
 from village_sim.agent.policy import choose_and_execute_action
-from village_sim.agent.state import AgentState
+from village_sim.agent.state import AgentState, MemoryMarker
 from village_sim.core.config import SimConfig
 from village_sim.core.time import SimClock, clock_from_tick
-from village_sim.core.types import ActionKind, PrimitiveAction, ResourceKind
+from village_sim.core.types import ActionKind, Position, PrimitiveAction, ResourceKind
 from village_sim.goap.executor import ExecutionResult, PlanExecutor
 from village_sim.goap.planner import PlanStep, plan
 from village_sim.orchestrator.action_model import (
@@ -30,7 +35,7 @@ from village_sim.sim.event_summary import (
     count_shelter_events,
 )
 from village_sim.sim.events import TickEvent
-from village_sim.sim.metrics import SimResult
+from village_sim.sim.metrics import LearningStats, SimResult
 from village_sim.sim.snapshot import AgentSnapshot, WorldSnapshot
 from village_sim.view.ascii_view import render_ascii_map
 from village_sim.world.discoverables import (
@@ -91,6 +96,14 @@ class Simulation:
     current_weather: WeatherState = field(init=False)
     _last_feels_cold: bool = field(default=False, init=False)
     _last_cold_status_bucket: ColdStatus = field(default=COLD_STATUS_OK, init=False)
+    learning: LearningStats = field(default_factory=LearningStats, init=False)
+    synthesized_actions_added: int = field(default=0, init=False)
+    goap_plan_executions: int = field(default=0, init=False)
+    successful_goap_plan_executions: int = field(default=0, init=False)
+    _last_memory_decision_key: tuple[str, str, int, int] | None = field(
+        default=None, init=False
+    )
+    _last_memory_decision_tick: int = field(default=-1_000_000, init=False)
 
     def __post_init__(self) -> None:
         self.config.validate()
@@ -161,6 +174,12 @@ class Simulation:
                 remembered_water_sites += 1
             elif memory.kind is ResourceKind.FOOD:
                 remembered_food_sites += 1
+        best_water: ResourceMemory | None = self.memory.best_memory(
+            ResourceKind.WATER, self.agent.position, self.tick, self.config
+        )
+        best_food: ResourceMemory | None = self.memory.best_memory(
+            ResourceKind.FOOD, self.agent.position, self.tick, self.config
+        )
         return SimResult(
             seed=self.config.seed,
             days_elapsed=days_elapsed,
@@ -183,6 +202,37 @@ class Simulation:
             distance_walked=self.agent.distance_walked,
             remembered_water_sites=remembered_water_sites,
             remembered_food_sites=remembered_food_sites,
+            learning=self.learning,
+            best_water_memory_x=-1 if best_water is None else best_water.position.x,
+            best_water_memory_y=-1 if best_water is None else best_water.position.y,
+            best_water_memory_confidence=(
+                0.0
+                if best_water is None
+                else best_water.decayed_confidence(self.tick, self.config)
+            ),
+            best_water_memory_successful_uses=(
+                0 if best_water is None else best_water.successful_uses
+            ),
+            best_water_memory_failed_uses=(
+                0 if best_water is None else best_water.failed_uses
+            ),
+            best_food_memory_x=-1 if best_food is None else best_food.position.x,
+            best_food_memory_y=-1 if best_food is None else best_food.position.y,
+            best_food_memory_confidence=(
+                0.0
+                if best_food is None
+                else best_food.decayed_confidence(self.tick, self.config)
+            ),
+            best_food_memory_successful_uses=(
+                0 if best_food is None else best_food.successful_uses
+            ),
+            best_food_memory_failed_uses=(
+                0 if best_food is None else best_food.failed_uses
+            ),
+            action_library_size=len(self.action_library.all_actions()),
+            synthesized_actions_added=self.synthesized_actions_added,
+            goap_plan_executions=self.goap_plan_executions,
+            successful_goap_plan_executions=self.successful_goap_plan_executions,
         )
 
     def snapshot(self, include_ascii: bool = False) -> WorldSnapshot:
@@ -202,6 +252,12 @@ class Simulation:
             feels_cold=self.current_weather.feels_cold,
             is_sheltered=self.agent_is_sheltered(),
             cold_status=self._cold_status_bucket(self.agent.cold_stress),
+            decision_source=self.agent.decision_trace.source.value,
+            decision_target_kind=self.agent.decision_trace.target_kind,
+            decision_target_x=self.agent.decision_trace.target_x,
+            decision_target_y=self.agent.decision_trace.target_y,
+            decision_memory_confidence=self.agent.decision_trace.memory_confidence,
+            memory_use_ratio=self.learning.memory_use_ratio,
         )
         ascii_map: str | None = (
             render_ascii_map(self.world, self.agent) if include_ascii else None
@@ -235,13 +291,38 @@ class Simulation:
         )
         for sighting in observation.all_sightings():
             is_new: bool = self.memory.observe(sighting, self.tick)
+            memory_record: ResourceMemory | None = self._memory_at(
+                sighting.kind, sighting.position
+            )
             if is_new:
                 if sighting.kind is ResourceKind.WATER:
                     self.agent.water_discoveries += 1
-                    self._log("memory", "discovered water")
+                    self.learning.learned_water_sites += 1
+                    self._log_at(
+                        "learning",
+                        self._learned_message(ResourceKind.WATER, sighting.position),
+                        sighting.position,
+                    )
                 elif sighting.kind is ResourceKind.FOOD:
                     self.agent.food_discoveries += 1
-                    self._log("memory", "discovered food")
+                    self.learning.learned_food_sites += 1
+                    self._log_at(
+                        "learning",
+                        self._learned_message(ResourceKind.FOOD, sighting.position),
+                        sighting.position,
+                    )
+            elif memory_record is not None:
+                confidence: str = self._format_confidence(
+                    memory_record.decayed_confidence(self.tick, self.config)
+                )
+                self._log_at(
+                    "learning",
+                    self._updated_memory_message(
+                        sighting.kind, sighting.position, confidence
+                    ),
+                    sighting.position,
+                )
+        self._sync_memory_markers()
 
         new_discoverable_ids: list[str] = update_discoverable_memory(
             self.discoverable_memory,
@@ -281,6 +362,9 @@ class Simulation:
                 self._log_agent_death()
             return
 
+        before_memory_state: dict[tuple[str, int, int], tuple[int, int]] = (
+            self._memory_use_state()
+        )
         action_message: str = choose_and_execute_action(
             self.agent,
             self.memory,
@@ -290,6 +374,9 @@ class Simulation:
             self.rng,
             self.config,
         )
+        self._record_decision_trace()
+        self._record_memory_use_deltas(before_memory_state)
+        self._sync_memory_markers()
         if (
             action_message in {"drank water", "ate food", "slept"}
             or self.tick % 48 == 0
@@ -533,6 +620,9 @@ class Simulation:
         if not steps:
             return []
 
+        self.goap_plan_executions += 1
+        self.agent.decision_trace.source = DecisionSource.GOAP
+        self.agent.decision_trace.reason = "executing GOAP plan"
         start_tick = self.tick
         executor = PlanExecutor(self)
         results: list[ExecutionResult] = []
@@ -550,9 +640,15 @@ class Simulation:
                     self.recorded_trajectories.append(result.trajectory)
                     self.orchestrator.record(result.trajectory)
                 for action in self.orchestrator.synthesize_all():
+                    before_count: int = len(self.action_library.all_actions())
                     self.action_library.add(action)
+                    after_count: int = len(self.action_library.all_actions())
+                    if after_count > before_count:
+                        self.synthesized_actions_added += after_count - before_count
             if not result.success or result.death or result.timeout:
                 break
+        if results and all(result.success for result in results):
+            self.successful_goap_plan_executions += 1
         if self.tick > start_tick:
             self.tick -= 1
         return results
@@ -574,7 +670,190 @@ class Simulation:
             reason = self.agent.death_reason.value
         self._log("death", f"agent died from {reason}")
 
+    def _memory_at(
+        self, kind: ResourceKind, position: Position
+    ) -> ResourceMemory | None:
+        for memory in self.memory.resource_memories:
+            if memory.kind is kind and memory.position == position:
+                return memory
+        return None
+
+    def _sync_memory_markers(self) -> None:
+        markers: list[MemoryMarker] = []
+        for memory in self.memory.resource_memories:
+            markers.append(
+                MemoryMarker(
+                    position=memory.position,
+                    kind=memory.kind,
+                    confidence=memory.decayed_confidence(self.tick, self.config),
+                )
+            )
+        self.agent.memory_markers = markers
+
+    def _memory_use_state(self) -> dict[tuple[str, int, int], tuple[int, int]]:
+        state: dict[tuple[str, int, int], tuple[int, int]] = {}
+        for memory in self.memory.resource_memories:
+            state[(memory.kind.value, memory.position.x, memory.position.y)] = (
+                memory.successful_uses,
+                memory.failed_uses,
+            )
+        return state
+
+    def _record_decision_trace(self) -> None:
+        trace = self.agent.decision_trace
+        if trace.source is DecisionSource.EXPLORE:
+            if trace.target_kind == ResourceKind.WATER.value:
+                self.learning.explore_for_water_ticks += 1
+            elif trace.target_kind == ResourceKind.FOOD.value:
+                self.learning.explore_for_food_ticks += 1
+            return
+        if trace.source is DecisionSource.VISIBLE_RESOURCE:
+            self.learning.visible_resource_target_ticks += 1
+            return
+        if trace.source is DecisionSource.REMEMBERED_RESOURCE:
+            self.learning.remembered_resource_target_ticks += 1
+            self._record_memory_selection(is_search=False)
+            return
+        if trace.source is DecisionSource.SEARCH_NEAR_MEMORY:
+            self.learning.search_near_memory_ticks += 1
+            self._record_memory_selection(is_search=True)
+
+    def _record_memory_selection(self, *, is_search: bool) -> None:
+        trace = self.agent.decision_trace
+        key: tuple[str, str, int, int] = (
+            trace.source.value,
+            trace.target_kind,
+            trace.target_x,
+            trace.target_y,
+        )
+        should_log: bool = (
+            self._last_memory_decision_key != key
+            or self.tick - self._last_memory_decision_tick >= 12
+        )
+        if trace.target_kind == ResourceKind.WATER.value:
+            if is_search:
+                self.learning.memory_search_water += 1
+            else:
+                self.learning.memory_selected_water += 1
+        elif trace.target_kind == ResourceKind.FOOD.value:
+            if is_search:
+                self.learning.memory_search_food += 1
+            else:
+                self.learning.memory_selected_food += 1
+        if should_log:
+            position = Position(x=trace.target_x, y=trace.target_y)
+            confidence = self._format_confidence(trace.memory_confidence)
+            if is_search:
+                memory = self._memory_at(ResourceKind(trace.target_kind), position)
+                radius = 0 if memory is None else memory.search_radius
+                message = self._searching_memory_message(
+                    ResourceKind(trace.target_kind), position, radius, confidence
+                )
+            else:
+                message = self._using_memory_message(
+                    ResourceKind(trace.target_kind), position, confidence
+                )
+            self._log_at("decision", message, position)
+            self._last_memory_decision_key = key
+            self._last_memory_decision_tick = self.tick
+
+    def _record_memory_use_deltas(
+        self, before_state: dict[tuple[str, int, int], tuple[int, int]]
+    ) -> None:
+        for memory in self.memory.resource_memories:
+            key = (memory.kind.value, memory.position.x, memory.position.y)
+            before_successes, before_failures = before_state.get(key, (0, 0))
+            confidence = self._format_confidence(
+                memory.decayed_confidence(self.tick, self.config)
+            )
+            if memory.successful_uses > before_successes:
+                if memory.kind is ResourceKind.WATER:
+                    self.learning.memory_reinforced_water += (
+                        memory.successful_uses - before_successes
+                    )
+                else:
+                    self.learning.memory_reinforced_food += (
+                        memory.successful_uses - before_successes
+                    )
+                self._log_at(
+                    "learning",
+                    self._reinforced_memory_message(memory, confidence),
+                    memory.position,
+                )
+            if memory.failed_uses > before_failures:
+                if memory.kind is ResourceKind.WATER:
+                    self.learning.memory_failed_water += (
+                        memory.failed_uses - before_failures
+                    )
+                else:
+                    self.learning.memory_failed_food += (
+                        memory.failed_uses - before_failures
+                    )
+                self._log_at(
+                    "learning",
+                    self._weakened_memory_message(memory, confidence),
+                    memory.position,
+                )
+
+    @staticmethod
+    def _format_confidence(confidence: float) -> str:
+        return f"{confidence:.2f}"
+
+    @staticmethod
+    def _learned_message(kind: ResourceKind, position: Position) -> str:
+        return f"learned {kind.value} at {position.x},{position.y}"
+
+    @staticmethod
+    def _updated_memory_message(
+        kind: ResourceKind, position: Position, confidence: str
+    ) -> str:
+        return (
+            f"updated {kind.value} memory at {position.x},{position.y} "
+            f"confidence={confidence}"
+        )
+
+    @staticmethod
+    def _using_memory_message(
+        kind: ResourceKind, position: Position, confidence: str
+    ) -> str:
+        return (
+            f"using remembered {kind.value} at {position.x},{position.y} "
+            f"confidence={confidence}"
+        )
+
+    @staticmethod
+    def _searching_memory_message(
+        kind: ResourceKind, position: Position, radius: int, confidence: str
+    ) -> str:
+        return (
+            f"searching near remembered {kind.value} at {position.x},{position.y} "
+            f"radius={radius} confidence={confidence}"
+        )
+
+    @staticmethod
+    def _reinforced_memory_message(memory: ResourceMemory, confidence: str) -> str:
+        return (
+            f"reinforced {memory.kind.value} memory at "
+            f"{memory.position.x},{memory.position.y} "
+            f"successful_uses={memory.successful_uses} confidence={confidence}"
+        )
+
+    @staticmethod
+    def _weakened_memory_message(memory: ResourceMemory, confidence: str) -> str:
+        return (
+            f"weakened {memory.kind.value} memory at "
+            f"{memory.position.x},{memory.position.y} "
+            f"failed_uses={memory.failed_uses} confidence={confidence}"
+        )
+
     def _log(self, kind: str, message: str) -> None:
+        if hasattr(self, "agent"):
+            position = self.agent.position
+        else:
+            position = Position(x=-1, y=-1)
+        self._log_at(kind, message, position)
+
+    def _log_at(self, kind: str, message: str, position: Position) -> None:
         clock: SimClock = clock_from_tick(self.tick, self.config)
         self.events.append(
             TickEvent(
@@ -587,7 +866,7 @@ class Simulation:
                 ),
                 kind=kind,
                 message=message,
-                x=self.agent.position.x if hasattr(self, "agent") else -1,
-                y=self.agent.position.y if hasattr(self, "agent") else -1,
+                x=position.x,
+                y=position.y,
             )
         )

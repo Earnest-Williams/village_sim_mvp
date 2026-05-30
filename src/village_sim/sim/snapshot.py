@@ -22,6 +22,12 @@ class AgentSnapshot:
     feels_cold: bool = False
     is_sheltered: bool = False
     cold_status: str = "ok"
+    decision_source: str = "none"
+    decision_target_kind: str = "none"
+    decision_target_x: int = -1
+    decision_target_y: int = -1
+    decision_memory_confidence: float = 0.0
+    memory_use_ratio: float = 0.0
 
     def to_json_obj(self) -> dict[str, Any]:
         return asdict(self)

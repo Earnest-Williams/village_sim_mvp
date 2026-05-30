@@ -10,13 +10,16 @@ MAP_DEFAULT_FOREGROUND: str = "#e8dcc4"
 MAP_STATUS_FOREGROUND: str = "#eadfcb"
 MAP_DEFAULT_FONT_POINT_SIZE: int = 9
 
-# Maps each semantic glyph role to an STC style number (1–13).
+# Maps each semantic glyph role to an STC style number.
 # Style 0 is left as the STC default (used for newlines and unknown roles).
 STC_ROLE_STYLE: dict[str, int] = {
     "summary": 1,
     "agent": 2,
     "agent_sleeping": 3,
     "water": 4,
+    "remembered_water": 14,
+    "remembered_food": 15,
+    "stale_memory": 16,
     "broadleaf": 5,
     "evergreen": 6,
     "grass": 7,
