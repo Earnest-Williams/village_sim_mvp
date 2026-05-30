@@ -541,7 +541,7 @@ class Simulation:
             return targets
         active_agents = pl.DataFrame(
             {
-                MEMORY_AGENT_ID: self.agent_ids[active_rows],
+                MEMORY_AGENT_ID: self.agent_ids[active_rows].astype(np.int32),
                 "agent_row": active_rows,
                 "agent_x": self.agents.x[active_rows],
                 "agent_y": self.agents.y[active_rows],
