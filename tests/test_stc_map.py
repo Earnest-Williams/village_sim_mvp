@@ -69,6 +69,17 @@ class StcMapContentTests(unittest.TestCase):
         self.assertEqual(plain_text.splitlines()[0], rendered.status)
         self.assertEqual(plain_text.splitlines()[1], rendered.legend)
 
+    def test_wx_header_split_does_not_duplicate_scale_with_short_legend(self) -> None:
+        rendered = RenderedMap(
+            status="Agent: x=0 y=0 goal=idle action=idle health=1.00 thirst=0.00 hunger=0.00 fatigue=0.00",
+            legend="Legend: @ agent, z sleeping | Scale: 1 tile ≈ 2m x 2m",
+            rows=[[MapGlyph("@", "agent")]],
+        )
+
+        wx_text, _style_runs = build_stc_content(rendered)
+
+        self.assertEqual(wx_text.count("Scale: 1 tile ≈ 2m x 2m"), 1)
+
     def test_gui_default_world_size_is_256(self) -> None:
         self.assertEqual(GUI_DEFAULT_WORLD_SIZE, 256)
 

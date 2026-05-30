@@ -247,6 +247,7 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
             fold_margin_highlight_method(True, map_bg)
         self._hide_map_margins()
 
+        self.map_ctrl.SetFont(map_font)
         self.map_ctrl.StyleSetFont(wxstc.STC_STYLE_DEFAULT, map_font)
         self.map_ctrl.StyleSetSize(
             wxstc.STC_STYLE_DEFAULT, self.map_font_size_ctrl.GetValue()

@@ -89,7 +89,10 @@ def _wx_header_lines(rendered_map: RenderedMap) -> list[str]:
         lines.append("Legend: " + ", ".join(legend_items[:5]))
         lines.append("        " + ", ".join(legend_items[5:]))
     else:
-        lines.append(rendered_map.legend)
+        if rendered_map.legend.startswith("Legend: "):
+            lines.append("Legend: " + ", ".join(legend_items))
+        else:
+            lines.append(", ".join(legend_items))
     if len(legend_parts) == 2:
         lines.append(f"Scale: {legend_parts[1]}")
     return lines
