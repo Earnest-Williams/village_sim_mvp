@@ -610,10 +610,9 @@ def _spill_floodwater_numba(
             continue
         excess: float = water_values[source] - bankfull_level[source]
         if excess <= 0.0:
-            if water_values[source] <= bankfull_level[source]:
-                restored: float = base_water[source]
-                if water_values[source] < restored:
-                    water_values[source] = restored
+            restored: float = base_water[source]
+            if water_values[source] < restored:
+                water_values[source] = restored
             continue
 
         best_target: int = _NO_NEIGHBOR
