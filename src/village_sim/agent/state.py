@@ -87,6 +87,8 @@ class AgentArrays:
     awake_ticks: NDArray[np.int32]
     current_goal: NDArray[np.int16]
     current_action: NDArray[np.int16]
+    action_queue_kind: NDArray[np.int32]
+    action_queue_duration: NDArray[np.int32]
 
     @property
     def alive(self) -> NDArray[np.bool_]:
@@ -125,6 +127,8 @@ def make_agent_arrays(capacity: int = MAX_AGENTS) -> AgentArrays:
         awake_ticks=np.zeros(capacity, dtype=np.int32),
         current_goal=np.zeros(capacity, dtype=np.int16),
         current_action=np.zeros(capacity, dtype=np.int16),
+        action_queue_kind=np.zeros(capacity, dtype=np.int32),
+        action_queue_duration=np.zeros(capacity, dtype=np.int32),
     )
 
 

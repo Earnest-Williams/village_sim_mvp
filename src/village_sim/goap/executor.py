@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 import random
 from dataclasses import dataclass
 from typing import Protocol
 
+import numpy as np
+from numpy.typing import NDArray
+
 from village_sim.agent.memory import DiscoverableAgentMemory
 from village_sim.agent.perception import Observation, perceive
-from village_sim.agent.state import AgentState
+from village_sim.agent.state import ACTION_TO_ID, AgentArrays, AgentState
 from village_sim.core.config import SimConfig
 from village_sim.core.time import SimClock, clock_from_tick
 from village_sim.core.types import ActionKind, Position, PrimitiveAction
@@ -27,6 +31,114 @@ from village_sim.world.discoverables import (
 from village_sim.world.grid import iter_neighbor_positions
 from village_sim.world.weather import WeatherState, make_weather_state
 from village_sim.world.world import World
+
+MAX_GOAP_PLANS_PER_TICK = 20
+ACTION_QUEUE_IDLE = 0
+
+
+def execute_action_queue(agent_arrays: AgentArrays) -> NDArray[np.int64]:
+    """Advance queued actions with one vectorized duration decrement."""
+
+    active_mask: NDArray[np.bool_] = agent_arrays.active & (
+        agent_arrays.action_queue_duration > 0
+    )
+    active_indices: NDArray[np.int64] = np.flatnonzero(active_mask).astype(
+        np.int64, copy=False
+    )
+    if active_indices.size == 0:
+        return active_indices
+    agent_arrays.action_queue_duration[active_mask] -= np.int32(1)
+    agent_arrays.current_action[active_mask] = agent_arrays.action_queue_kind[
+        active_mask
+    ].astype(np.int16, copy=False)
+    completed_mask: NDArray[np.bool_] = active_mask & (
+        agent_arrays.action_queue_duration == 0
+    )
+    agent_arrays.action_queue_kind[completed_mask] = np.int32(ACTION_QUEUE_IDLE)
+    return active_indices
+
+
+def agents_requiring_goap_plan(
+    agent_arrays: AgentArrays, max_plans_per_tick: int = MAX_GOAP_PLANS_PER_TICK
+) -> NDArray[np.int64]:
+    """Return a CPU-budgeted slice of agents eligible for GOAP planning."""
+
+    if max_plans_per_tick < 0:
+        raise ValueError("max_plans_per_tick must be non-negative")
+    if max_plans_per_tick == 0:
+        return np.empty(0, dtype=np.int64)
+    eligible_mask: NDArray[np.bool_] = agent_arrays.active & (
+        agent_arrays.action_queue_duration == 0
+    )
+    eligible: NDArray[np.int64] = np.flatnonzero(eligible_mask).astype(
+        np.int64, copy=False
+    )
+    return eligible[:max_plans_per_tick]
+
+
+def enqueue_agent_actions(
+    agent_arrays: AgentArrays,
+    agent_indices: NDArray[np.int64],
+    action_kinds: NDArray[np.int32],
+    durations: NDArray[np.int32],
+) -> None:
+    """Install planned actions into array queues without per-agent mutation."""
+
+    if (
+        agent_indices.shape != action_kinds.shape
+        or agent_indices.shape != durations.shape
+    ):
+        raise ValueError("agent_indices, action_kinds, and durations must share shape")
+    if agent_indices.ndim != 1:
+        raise ValueError("action queue inputs must be one-dimensional")
+    if agent_indices.size == 0:
+        return
+    if np.any(agent_indices < 0) or np.any(agent_indices >= agent_arrays.count):
+        raise IndexError("agent index out of range")
+    if np.any(durations < 0):
+        raise ValueError("queued action durations must be non-negative")
+    agent_arrays.action_queue_kind[agent_indices] = action_kinds
+    agent_arrays.action_queue_duration[agent_indices] = durations
+
+
+def enqueue_plan_heads(
+    agent_arrays: AgentArrays,
+    agent_indices: NDArray[np.int64],
+    plan_steps: Sequence[PlanStep],
+) -> None:
+    """Queue the first action from each supplied plan for budgeted execution."""
+
+    if agent_indices.size != len(plan_steps):
+        raise ValueError("agent_indices and plan_steps must have equal length")
+    if not plan_steps:
+        return
+    action_kinds = np.asarray(
+        [_action_kind_id_from_step(step) for step in plan_steps],
+        dtype=np.int32,
+    )
+    durations = np.fromiter(
+        (max(1, step.action.cost_model.base_ticks) for step in plan_steps),
+        dtype=np.int32,
+        count=len(plan_steps),
+    )
+    enqueue_agent_actions(agent_arrays, agent_indices, action_kinds, durations)
+
+
+def _action_kind_id_from_step(step: PlanStep) -> int:
+    action_id = step.action.action_id.lower()
+    if "drink" in action_id or "water" in action_id:
+        return ACTION_TO_ID[ActionKind.DRINK]
+    if "eat" in action_id or "food" in action_id:
+        return ACTION_TO_ID[ActionKind.EAT]
+    if "sleep" in action_id or "rest" in action_id:
+        return ACTION_TO_ID[ActionKind.SLEEP]
+    if "move" in action_id or "travel" in action_id or "path" in action_id:
+        return ACTION_TO_ID[ActionKind.MOVE]
+    if "search" in action_id:
+        return ACTION_TO_ID[ActionKind.SEARCH]
+    if "explore" in action_id:
+        return ACTION_TO_ID[ActionKind.EXPLORE]
+    return ACTION_TO_ID[ActionKind.IDLE]
 
 
 @dataclass(slots=True)
