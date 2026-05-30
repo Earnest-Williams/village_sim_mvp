@@ -5,6 +5,8 @@ from __future__ import annotations
 import msgpack
 import tempfile
 import unittest
+
+import pytest
 from pathlib import Path
 
 from village_sim.goap.knowledge import (
@@ -153,3 +155,31 @@ class TestPacketSerialisationRoundTrip(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_transfer_action_knowledge_vectorized_margin() -> None:
+    import numpy as np
+    import polars as pl
+
+    from village_sim.goap.knowledge import transfer_action_knowledge
+
+    frame = pl.DataFrame(
+        {
+            "agent_id": [0, 1],
+            "source_agent_id": ["founder", "self"],
+            "confidence": [0.9, 0.2],
+            "action_id": ["drink", "drink"],
+            "policy_id": ["p0", "p0"],
+        }
+    )
+
+    updated = transfer_action_knowledge(
+        frame,
+        np.asarray([0], dtype=np.int64),
+        np.asarray([1], dtype=np.int64),
+        trust_in_source=1.0,
+    )
+
+    learner = updated.filter(pl.col("agent_id") == 1).to_dict(as_series=False)
+    assert learner["confidence"][0] == pytest.approx(0.9)
+    assert learner["source_agent_id"] == ["0"]

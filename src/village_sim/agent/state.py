@@ -16,6 +16,8 @@ from village_sim.core.types import (
     ResourceKind,
 )
 
+MAX_AGENTS = 500
+
 
 @dataclass(frozen=True, slots=True)
 class MemoryMarker:
@@ -28,7 +30,11 @@ class MemoryMarker:
 
 @dataclass(slots=True)
 class AgentState:
-    """Mutable compatibility state for a single survival agent."""
+    """Cold-path compatibility view for one survival agent.
+
+    Hot simulation code must use :class:`AgentArrays` as the source of truth.
+    This adapter remains for renderers, GOAP compatibility, and legacy tests.
+    """
 
     agent_id: int
     position: Position
@@ -70,17 +76,23 @@ class AgentArrays:
     """Struct-of-arrays source of truth for hot agent simulation fields."""
 
     count: int
-    alive: NDArray[np.bool_]
+    active: NDArray[np.bool_]
     x: NDArray[np.int32]
     y: NDArray[np.int32]
-    thirst: NDArray[np.float64]
-    hunger: NDArray[np.float64]
-    fatigue: NDArray[np.float64]
-    cold_stress: NDArray[np.float64]
-    health: NDArray[np.float64]
+    thirst: NDArray[np.float32]
+    hunger: NDArray[np.float32]
+    fatigue: NDArray[np.float32]
+    cold_stress: NDArray[np.float32]
+    health: NDArray[np.float32]
     awake_ticks: NDArray[np.int32]
     current_goal: NDArray[np.int16]
     current_action: NDArray[np.int16]
+
+    @property
+    def alive(self) -> NDArray[np.bool_]:
+        """Compatibility alias for the active mask."""
+
+        return self.active
 
 
 ACTION_TO_ID: dict[ActionKind, int] = {
@@ -93,31 +105,37 @@ GOAL_TO_ID: dict[GoalKind, int] = {goal: index for index, goal in enumerate(Goal
 ID_TO_GOAL: dict[int, GoalKind] = {index: goal for goal, index in GOAL_TO_ID.items()}
 
 
-def make_agent_arrays(capacity: int) -> AgentArrays:
-    """Allocate zero-filled SoA buffers for the requested agent capacity."""
+def make_agent_arrays(capacity: int = MAX_AGENTS) -> AgentArrays:
+    """Allocate bounded SoA buffers for the requested agent capacity."""
 
     if capacity <= 0:
         raise ValueError("agent array capacity must be positive")
+    if capacity > MAX_AGENTS:
+        raise ValueError("agent array capacity exceeds MAX_AGENTS")
     return AgentArrays(
         count=capacity,
-        alive=np.zeros(capacity, dtype=np.bool_),
+        active=np.zeros(capacity, dtype=np.bool_),
         x=np.zeros(capacity, dtype=np.int32),
         y=np.zeros(capacity, dtype=np.int32),
-        thirst=np.zeros(capacity, dtype=np.float64),
-        hunger=np.zeros(capacity, dtype=np.float64),
-        fatigue=np.zeros(capacity, dtype=np.float64),
-        cold_stress=np.zeros(capacity, dtype=np.float64),
-        health=np.ones(capacity, dtype=np.float64),
+        thirst=np.zeros(capacity, dtype=np.float32),
+        hunger=np.zeros(capacity, dtype=np.float32),
+        fatigue=np.zeros(capacity, dtype=np.float32),
+        cold_stress=np.zeros(capacity, dtype=np.float32),
+        health=np.ones(capacity, dtype=np.float32),
         awake_ticks=np.zeros(capacity, dtype=np.int32),
         current_goal=np.zeros(capacity, dtype=np.int16),
         current_action=np.zeros(capacity, dtype=np.int16),
     )
 
 
-def agent_arrays_from_states(agents: list[AgentState]) -> AgentArrays:
-    """Create SoA buffers from compatibility dataclasses."""
+def agent_arrays_from_states(
+    agents: list[AgentState], capacity: int = MAX_AGENTS
+) -> AgentArrays:
+    """Create preallocated SoA buffers from compatibility dataclasses."""
 
-    arrays: AgentArrays = make_agent_arrays(len(agents))
+    if len(agents) > capacity:
+        raise ValueError("agent state count exceeds requested array capacity")
+    arrays: AgentArrays = make_agent_arrays(capacity)
     for index, agent in enumerate(agents):
         sync_agent_to_arrays(arrays, agent, index)
     return arrays
@@ -127,14 +145,14 @@ def sync_agent_to_arrays(arrays: AgentArrays, agent: AgentState, index: int) -> 
     """Copy one compatibility AgentState into SoA buffers."""
 
     _validate_index(arrays, index)
-    arrays.alive[index] = agent.alive
+    arrays.active[index] = agent.alive
     arrays.x[index] = agent.position.x
     arrays.y[index] = agent.position.y
-    arrays.thirst[index] = agent.thirst
-    arrays.hunger[index] = agent.hunger
-    arrays.fatigue[index] = agent.fatigue
-    arrays.cold_stress[index] = agent.cold_stress
-    arrays.health[index] = agent.health
+    arrays.thirst[index] = np.float32(agent.thirst)
+    arrays.hunger[index] = np.float32(agent.hunger)
+    arrays.fatigue[index] = np.float32(agent.fatigue)
+    arrays.cold_stress[index] = np.float32(agent.cold_stress)
+    arrays.health[index] = np.float32(agent.health)
     arrays.awake_ticks[index] = agent.awake_ticks
     arrays.current_goal[index] = GOAL_TO_ID[agent.current_goal]
     arrays.current_action[index] = ACTION_TO_ID[agent.current_action]
@@ -151,7 +169,7 @@ def sync_agent_from_arrays(arrays: AgentArrays, agent: AgentState, index: int) -
     agent.cold_stress = float(arrays.cold_stress[index])
     agent.health = float(arrays.health[index])
     agent.awake_ticks = int(arrays.awake_ticks[index])
-    agent.alive = bool(arrays.alive[index])
+    agent.alive = bool(arrays.active[index])
     agent.current_goal = ID_TO_GOAL.get(
         int(arrays.current_goal[index]), GoalKind.EXPLORE
     )
@@ -166,40 +184,36 @@ def validate_arrays_match_dataclasses(
 ) -> None:
     """Strict debug assertion that compatibility state matches SoA buffers."""
 
-    if agent_arrays.count != len(agent_state_list):
-        raise AssertionError("agent array count does not match dataclass count")
+    if agent_arrays.count < len(agent_state_list):
+        raise AssertionError("agent array count is smaller than dataclass count")
     for index, agent in enumerate(agent_state_list):
-        if bool(agent_arrays.alive[index]) != agent.alive:
-            raise AssertionError("agent alive mismatch")
+        if bool(agent_arrays.active[index]) != agent.alive:
+            raise AssertionError("agent active mask mismatch")
         if int(agent_arrays.x[index]) != agent.position.x:
             raise AssertionError("agent x mismatch")
         if int(agent_arrays.y[index]) != agent.position.y:
             raise AssertionError("agent y mismatch")
-        _assert_float_matches(float(agent_arrays.thirst[index]), agent.thirst, "thirst")
-        _assert_float_matches(float(agent_arrays.hunger[index]), agent.hunger, "hunger")
-        _assert_float_matches(
-            float(agent_arrays.fatigue[index]), agent.fatigue, "fatigue"
-        )
-        _assert_float_matches(
-            float(agent_arrays.cold_stress[index]), agent.cold_stress, "cold_stress"
-        )
-        _assert_float_matches(float(agent_arrays.health[index]), agent.health, "health")
+        if abs(float(agent_arrays.thirst[index]) - agent.thirst) > 1.0e-6:
+            raise AssertionError("agent thirst mismatch")
+        if abs(float(agent_arrays.hunger[index]) - agent.hunger) > 1.0e-6:
+            raise AssertionError("agent hunger mismatch")
+        if abs(float(agent_arrays.fatigue[index]) - agent.fatigue) > 1.0e-6:
+            raise AssertionError("agent fatigue mismatch")
+        if abs(float(agent_arrays.cold_stress[index]) - agent.cold_stress) > 1.0e-6:
+            raise AssertionError("agent cold stress mismatch")
+        if abs(float(agent_arrays.health[index]) - agent.health) > 1.0e-6:
+            raise AssertionError("agent health mismatch")
         if int(agent_arrays.awake_ticks[index]) != agent.awake_ticks:
-            raise AssertionError("agent awake_ticks mismatch")
-        if ID_TO_GOAL[int(agent_arrays.current_goal[index])] is not agent.current_goal:
-            raise AssertionError("agent current_goal mismatch")
+            raise AssertionError("agent awake ticks mismatch")
+        if ID_TO_GOAL.get(int(agent_arrays.current_goal[index])) != agent.current_goal:
+            raise AssertionError("agent goal mismatch")
         if (
-            ID_TO_ACTION[int(agent_arrays.current_action[index])]
-            is not agent.current_action
+            ID_TO_ACTION.get(int(agent_arrays.current_action[index]))
+            != agent.current_action
         ):
-            raise AssertionError("agent current_action mismatch")
+            raise AssertionError("agent action mismatch")
 
 
 def _validate_index(arrays: AgentArrays, index: int) -> None:
-    if not 0 <= index < arrays.count:
+    if index < 0 or index >= arrays.count:
         raise IndexError("agent array index out of range")
-
-
-def _assert_float_matches(actual: float, expected: float, name: str) -> None:
-    if abs(actual - expected) > 1e-12:
-        raise AssertionError(f"agent {name} mismatch")
