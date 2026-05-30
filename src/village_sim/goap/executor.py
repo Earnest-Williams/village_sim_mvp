@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from village_sim.agent.memory import DiscoverableAgentMemory
-from village_sim.agent.needs import update_needs
 from village_sim.agent.perception import Observation, perceive
 from village_sim.agent.state import AgentState
 from village_sim.core.config import SimConfig
@@ -66,6 +65,15 @@ class _SimulationSurface(Protocol):
     ) -> int: ...
 
     def advance_interaction_ticks(self, interaction_ticks: int) -> None: ...
+
+    def _update_agent_needs(
+        self,
+        *,
+        is_night: bool = False,
+        is_raining: bool = False,
+        is_sheltered: bool = False,
+        is_cold_exposed: bool | None = None,
+    ) -> None: ...
 
 
 class ExecutorRegistry:
@@ -330,9 +338,7 @@ class PlanExecutor:
         if self._needs_updated_tick == sim.tick:
             return
         clock = clock_from_tick(sim.tick, sim.config)
-        update_needs(
-            sim.agent,
-            sim.config,
+        sim._update_agent_needs(
             is_night=clock.is_night,
             is_raining=sim.current_weather.is_raining,
             is_sheltered=_is_sheltered(sim.world, sim.agent.position),

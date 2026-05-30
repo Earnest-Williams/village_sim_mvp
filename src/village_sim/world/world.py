@@ -5,6 +5,9 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass, field
 
+import numpy as np
+from numpy.typing import NDArray
+
 from village_sim.core.config import SimConfig
 from village_sim.core.types import Position, TerrainKind
 from village_sim.world.discoverables import Discoverable, update_discoverables_daily
@@ -22,10 +25,13 @@ from village_sim.world.water_system import (
 from village_sim.world.terrain import (
     carve_stream,
     classify_terrain,
-    generate_height_map,
     estimate_slope,
+    generate_height_map,
     walk_cost,
 )
+
+FloatGrid = NDArray[np.float64]
+IntGrid = NDArray[np.int64]
 
 
 def _new_discoverables() -> dict[str, Discoverable]:
@@ -36,17 +42,17 @@ def _new_discoverables() -> dict[str, Discoverable]:
 class World:
     """Portable world state.
 
-    Arrays are flat row-major lists. This makes the Python MVP simple while keeping a
-    direct migration path to NumPy arrays or a native memory layout later.
+    Arrays are flat row-major NumPy buffers for cache-local environmental updates.
+    Legacy list inputs are accepted at API boundaries and normalized during setup.
     """
 
     width: int
     height: int
-    height_map: list[float]
-    terrain: list[int]
-    water: list[float]
-    food: list[float]
-    food_capacity: list[float]
+    height_map: list[float] | FloatGrid
+    terrain: list[int] | IntGrid
+    water: list[float] | FloatGrid
+    food: list[float] | FloatGrid
+    food_capacity: list[float] | FloatGrid
     water_system: WaterSystemState = field(init=False)
     rain_system: RainSystem = field(default_factory=RainSystem)
     discoverables: dict[str, Discoverable] = field(default_factory=_new_discoverables)
@@ -174,11 +180,15 @@ def generate_world(
     discoverables: dict[str, Discoverable] | None = None,
 ) -> World:
     config.validate()
-    height_map: list[float] = generate_height_map(config.width, config.height, rng)
-    terrain: list[int] = classify_terrain(config.width, config.height, height_map, rng)
+    height_map: FloatGrid = generate_height_map(config.width, config.height, rng)
+    terrain: IntGrid = classify_terrain(config.width, config.height, height_map, rng)
     carve_stream(config.width, config.height, height_map, terrain, rng)
-    water: list[float] = initialize_water(terrain)
-    food, food_capacity = initialize_food(config.width, config.height, terrain, rng)
+    water: FloatGrid = initialize_water(terrain)
+    food_values, food_capacity_values = initialize_food(
+        config.width, config.height, terrain, rng
+    )
+    food: FloatGrid = np.asarray(food_values, dtype=np.float64)
+    food_capacity: FloatGrid = np.asarray(food_capacity_values, dtype=np.float64)
     return World(
         width=config.width,
         height=config.height,
