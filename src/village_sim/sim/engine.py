@@ -141,9 +141,7 @@ class Simulation:
 
         environment_start: float = perf_counter()
         clock: SimClock = clock_from_tick(self.tick, self.config)
-        raining: bool = self.world.step_environment(
-            self.rng, self.config, clock.tick_of_day
-        )
+        raining: bool = self.world.step_environment(self.rng, self.config, self.tick)
         weather: WeatherState = make_weather_state(
             is_raining=raining,
             is_night=clock.is_night,
