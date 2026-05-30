@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import random
+from typing import List, Tuple, Any
+
+import numpy as np
+from numpy.typing import NDArray
 
 from village_sim.agent.actions import (
     execute_drink,
@@ -14,21 +18,15 @@ from village_sim.agent.actions import (
 )
 from village_sim.agent.decision import DecisionSource, DecisionTrace
 from village_sim.agent.memory import AgentMemory, ResourceMemory
-from village_sim.agent.perception import Observation
 from village_sim.agent.state import AgentState
 from village_sim.core.config import SimConfig
 from village_sim.core.time import SimClock
-from village_sim.core.types import GoalKind, Position, ResourceKind, ResourceSighting
+from village_sim.core.types import GoalKind, Position, ResourceKind
 from village_sim.world.world import World
 
 
-def choose_goal(
-    agent: AgentState, observation: Observation, clock: SimClock
-) -> GoalKind:
+def choose_goal(agent: AgentState, clock: SimClock) -> GoalKind:
     """Pick a high-level goal from current needs and time of day."""
-
-    del observation
-
     if agent.thirst >= 0.64:
         return GoalKind.GET_WATER
     if agent.hunger >= 0.66:
@@ -43,24 +41,24 @@ def choose_goal(
 def choose_and_execute_action(
     agent: AgentState,
     memory: AgentMemory,
-    observation: Observation,
+    visible_water_indices: NDArray[np.int64],
+    visible_food_indices: NDArray[np.int64],
     world: World,
     clock: SimClock,
     rng: random.Random,
     config: SimConfig,
 ) -> str:
-    """Resolve a goal to a concrete action and execute it."""
-
+    """Resolve a goal to a concrete action and execute it over pure index arrays."""
     agent.decision_trace = DecisionTrace()
-    agent.current_goal = choose_goal(agent, observation, clock)
+    agent.current_goal = choose_goal(agent, clock)
 
     if agent.current_goal is GoalKind.GET_WATER:
         return _resolve_water_goal(
-            agent, memory, observation, world, clock.tick, rng, config
+            agent, memory, visible_water_indices, world, clock.tick, rng, config
         )
     if agent.current_goal is GoalKind.GET_FOOD:
         return _resolve_food_goal(
-            agent, memory, observation, world, clock.tick, rng, config
+            agent, memory, visible_food_indices, world, clock.tick, rng, config
         )
     if agent.current_goal is GoalKind.SLEEP:
         return execute_sleep(agent)
@@ -76,7 +74,7 @@ def choose_and_execute_action(
 def _resolve_water_goal(
     agent: AgentState,
     memory: AgentMemory,
-    observation: Observation,
+    visible_water_indices: NDArray[np.int64],
     world: World,
     tick: int,
     rng: random.Random,
@@ -93,19 +91,19 @@ def _resolve_water_goal(
         )
         return execute_drink(agent, memory, world, tick, config)
 
-    closest_visible: ResourceSighting | None = _closest_sighting(
-        agent.position,
-        observation.visible_water,
+    closest_idx: int = _closest_visible_idx(
+        agent.position.x, agent.position.y, visible_water_indices, world.width
     )
-    if closest_visible is not None:
+    if closest_idx != -1:
+        target_pos = Position(x=closest_idx % world.width, y=closest_idx // world.width)
         _set_position_trace(
             agent,
             DecisionSource.VISIBLE_RESOURCE,
             ResourceKind.WATER,
-            closest_visible.position,
+            target_pos,
             "visible water in range",
         )
-        return execute_move_toward(agent, world, closest_visible.position, rng)
+        return execute_move_toward(agent, world, target_pos, rng)
 
     remembered: ResourceMemory | None = memory.best_memory(
         ResourceKind.WATER,
@@ -154,7 +152,7 @@ def _resolve_water_goal(
 def _resolve_food_goal(
     agent: AgentState,
     memory: AgentMemory,
-    observation: Observation,
+    visible_food_indices: NDArray[np.int64],
     world: World,
     tick: int,
     rng: random.Random,
@@ -171,19 +169,19 @@ def _resolve_food_goal(
         )
         return execute_eat(agent, memory, world, tick, config)
 
-    closest_visible: ResourceSighting | None = _closest_sighting(
-        agent.position,
-        observation.visible_food,
+    closest_idx: int = _closest_visible_idx(
+        agent.position.x, agent.position.y, visible_food_indices, world.width
     )
-    if closest_visible is not None:
+    if closest_idx != -1:
+        target_pos = Position(x=closest_idx % world.width, y=closest_idx // world.width)
         _set_position_trace(
             agent,
             DecisionSource.VISIBLE_RESOURCE,
             ResourceKind.FOOD,
-            closest_visible.position,
+            target_pos,
             "visible food in range",
         )
-        return execute_move_toward(agent, world, closest_visible.position, rng)
+        return execute_move_toward(agent, world, target_pos, rng)
 
     remembered: ResourceMemory | None = memory.best_memory(
         ResourceKind.FOOD,
@@ -266,15 +264,18 @@ def _set_memory_trace(
     )
 
 
-def _closest_sighting(
-    position: Position,
-    sightings: list[ResourceSighting],
-) -> ResourceSighting | None:
-    best: ResourceSighting | None = None
-    best_distance: float = 1_000_000.0
-    for sighting in sightings:
-        distance: float = position.distance_to(sighting.position)
-        if distance < best_distance:
-            best_distance = distance
-            best = sighting
-    return best
+def _closest_visible_idx(
+    agent_x: int,
+    agent_y: int,
+    indices: NDArray[np.int64],
+    width: int,
+) -> int:
+    """Find the nearest tile index using purely vectorized Euclidean distance."""
+    if indices.size == 0:
+        return -1
+
+    xs: NDArray[np.int64] = indices % width
+    ys: NDArray[np.int64] = indices // width
+    distances: NDArray[np.float64] = np.sqrt((xs - agent_x) ** 2 + (ys - agent_y) ** 2)
+    best_loc: int = int(np.argmin(distances))
+    return int(indices[best_loc])
