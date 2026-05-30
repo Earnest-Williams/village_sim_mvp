@@ -85,17 +85,12 @@ def _wx_header_lines(rendered_map: RenderedMap) -> list[str]:
 
     legend_parts = rendered_map.legend.split(" | Scale: ", maxsplit=1)
     legend = legend_parts[0]
-    if legend.startswith("Legend: "):
-        legend = legend.removeprefix("Legend: ")
-    legend_items = legend.split(", ")
+    legend_items = legend.removeprefix("Legend: ").split(", ") if legend.startswith("Legend: ") else legend.split(", ")
     if len(legend_items) > 5:
         lines.append("Legend: " + ", ".join(legend_items[:5]))
         lines.append("        " + ", ".join(legend_items[5:]))
     else:
-        if rendered_map.legend.startswith("Legend: "):
-            lines.append("Legend: " + ", ".join(legend_items))
-        else:
-            lines.append(", ".join(legend_items))
+        lines.append(legend)
     if len(legend_parts) == 2:
         lines.append(f"Scale: {legend_parts[1]}")
     return lines
