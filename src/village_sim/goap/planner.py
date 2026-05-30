@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
-
+import numpy as np
 import polars as pl
+from numpy.typing import NDArray
 
 from village_sim.orchestrator.action_model import (
     ActionLifecycle,
@@ -15,6 +15,8 @@ from village_sim.orchestrator.action_model import (
 from village_sim.orchestrator.symbolic import FactValue, SymbolicState
 
 AGENT_ID = "agent_id"
+_NO_PARENT_NODE = -1
+_NO_ACTION_INDEX = -1
 
 
 @dataclass(slots=True)
@@ -23,23 +25,16 @@ class PlanStep:
     expected_cost: float
 
 
-@dataclass(slots=True)
-class _SearchNode:
-    state: SymbolicState
-    steps: list[PlanStep]
-    total_cost: float
-
-
 def _action_applicable(
     action: SynthesizedAction,
     state: Mapping[str, FactValue],
 ) -> bool:
     """Check hard preconditions against the current symbolic state."""
 
-    if not action.preconditions:
-        return True
-    frame: pl.DataFrame = symbolic_state_frame(state)
-    return filter_agents_for_action(frame, action).height > 0
+    for fact, required_value in action.preconditions.items():
+        if state.get(fact) != required_value:
+            return False
+    return True
 
 
 def _expected_cost(action: SynthesizedAction, failure_penalty: float = 50.0) -> float:
@@ -172,54 +167,125 @@ def _plan_with_actions(
     max_depth: int,
     beam_width: int,
 ) -> list[PlanStep]:
-    frontier: list[_SearchNode] = [
-        _SearchNode(state=dict(state), steps=[], total_cost=0.0)
-    ]
+    node_states: list[SymbolicState] = [dict(state)]
+    node_parent_indices: list[int] = [_NO_PARENT_NODE]
+    node_action_indices: list[int] = [_NO_ACTION_INDEX]
+    node_step_costs: list[float] = [0.0]
+    node_total_costs: list[float] = [0.0]
+    frontier_node_indices: NDArray[np.int64] = np.zeros(1, dtype=np.int64)
     visited: set[tuple[tuple[str, FactValue], ...]] = {_state_signature(state)}
-    best_plan: list[PlanStep] = []
+    best_plan_node_index: int = _NO_PARENT_NODE
     best_cost: float = float("inf")
+    max_candidates: int = max(1, beam_width * max(1, len(actions)))
+    candidate_node_indices: NDArray[np.int64] = np.empty(max_candidates, dtype=np.int64)
+    candidate_costs: NDArray[np.float64] = np.empty(max_candidates, dtype=np.float64)
+    candidate_action_ids: NDArray[np.int64] = np.empty(max_candidates, dtype=np.int64)
 
     for _depth in range(max_depth):
-        next_frontier: list[_SearchNode] = []
-        for node in frontier:
-            for action in actions:
-                if not _action_applicable(action, node.state):
-                    continue
-                if not _action_advances_goal(action, node.state, goal):
-                    continue
-                if any(
-                    step.action.action_id == action.action_id for step in node.steps
+        candidate_count: int = 0
+        for frontier_index in range(frontier_node_indices.size):
+            node_index: int = int(frontier_node_indices[frontier_index])
+            node_state: SymbolicState = node_states[node_index]
+            node_cost: float = node_total_costs[node_index]
+            for action_index, action in enumerate(actions):
+                if _node_has_action(
+                    node_index, action_index, node_parent_indices, node_action_indices
                 ):
                     continue
-                after_state = _apply_action_effects(node.state, action, goal)
-                if after_state == node.state:
+                if not _action_applicable(action, node_state):
                     continue
-                signature = _state_signature(after_state)
+                if not _action_advances_goal(action, node_state, goal):
+                    continue
+                after_state: SymbolicState = _apply_action_effects(
+                    node_state, action, goal
+                )
+                if after_state == node_state:
+                    continue
+                signature: tuple[tuple[str, FactValue], ...] = _state_signature(
+                    after_state
+                )
                 if signature in visited:
                     continue
                 visited.add(signature)
-                step_cost = _expected_cost(action)
-                steps = [*node.steps, PlanStep(action=action, expected_cost=step_cost)]
-                total_cost = node.total_cost + step_cost
+                step_cost: float = _expected_cost(action)
+                total_cost: float = node_cost + step_cost
+                new_node_index: int = len(node_states)
+                node_states.append(after_state)
+                node_parent_indices.append(node_index)
+                node_action_indices.append(action_index)
+                node_step_costs.append(step_cost)
+                node_total_costs.append(total_cost)
                 if _goal_satisfied(after_state, goal):
                     if total_cost < best_cost:
                         best_cost = total_cost
-                        best_plan = steps
+                        best_plan_node_index = new_node_index
                     continue
-                if total_cost < best_cost:
-                    next_frontier.append(
-                        _SearchNode(
-                            state=after_state,
-                            steps=steps,
-                            total_cost=total_cost,
-                        )
-                    )
-        next_frontier.sort(key=lambda item: item.total_cost)
-        frontier = next_frontier[:beam_width]
-        if not frontier:
-            break
+                if total_cost >= best_cost:
+                    continue
+                if candidate_count >= max_candidates:
+                    continue
+                candidate_node_indices[candidate_count] = new_node_index
+                candidate_costs[candidate_count] = total_cost
+                candidate_action_ids[candidate_count] = action_index
+                candidate_count += 1
 
-    return best_plan
+        if candidate_count == 0:
+            break
+        ordered_indices: NDArray[np.int64] = np.lexsort(
+            (
+                candidate_action_ids[:candidate_count],
+                candidate_costs[:candidate_count],
+            )
+        ).astype(np.int64, copy=False)
+        keep_count: int = min(beam_width, candidate_count)
+        frontier_node_indices = candidate_node_indices[ordered_indices[:keep_count]]
+
+    if best_plan_node_index == _NO_PARENT_NODE:
+        return []
+    return _plan_steps_from_node(
+        best_plan_node_index,
+        node_parent_indices,
+        node_action_indices,
+        node_step_costs,
+        actions,
+    )
+
+
+def _node_has_action(
+    node_index: int,
+    action_index: int,
+    parent_indices: list[int],
+    action_indices: list[int],
+) -> bool:
+    current_index: int = node_index
+    while current_index != _NO_PARENT_NODE:
+        if action_indices[current_index] == action_index:
+            return True
+        current_index = parent_indices[current_index]
+    return False
+
+
+def _plan_steps_from_node(
+    node_index: int,
+    parent_indices: list[int],
+    action_indices: list[int],
+    step_costs: list[float],
+    actions: list[SynthesizedAction],
+) -> list[PlanStep]:
+    reverse_steps: list[PlanStep] = []
+    current_index: int = node_index
+    while current_index != _NO_PARENT_NODE:
+        action_index: int = action_indices[current_index]
+        if action_index != _NO_ACTION_INDEX:
+            reverse_steps.append(
+                PlanStep(
+                    action=actions[action_index],
+                    expected_cost=step_costs[current_index],
+                )
+            )
+        current_index = parent_indices[current_index]
+    reverse_steps.reverse()
+    return reverse_steps
 
 
 def _eligible_actions(
@@ -267,16 +333,14 @@ def _symbolic_state_from_frame(frame: pl.DataFrame, agent_id: int) -> SymbolicSt
     row: pl.DataFrame = frame.filter(pl.col(AGENT_ID) == agent_id)
     if row.height != 1:
         raise ValueError("agent state frame must contain exactly one row for agent_id")
-    values: dict[str, list[Any]] = row.to_dict(as_series=False)
     state: SymbolicState = {}
-    for key, column in values.items():
+    for key in row.columns:
         if key == AGENT_ID:
             continue
-        if len(column) != 1:
-            raise ValueError(f"symbolic frame missing scalar column: {key}")
-        value: Any = column[0]
+        value: object = row.get_column(key).item()
         if isinstance(value, bool | int | float | str):
-            state[key] = value
+            fact_value: FactValue = value
+            state[key] = fact_value
     return state
 
 
