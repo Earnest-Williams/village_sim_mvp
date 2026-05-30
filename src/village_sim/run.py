@@ -43,7 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--action-library-in",
         type=Path,
         default=None,
-        help="optional JSON action library to load before running",
+        help="optional MessagePack action library to load before running",
     )
     parser.add_argument(
         "--action-library-out",
@@ -61,13 +61,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--snapshot-every",
         type=int,
         default=0,
-        help="store ASCII snapshots every N ticks in the replay JSON",
+        help="store ASCII snapshots every N ticks in the replay MessagePack",
     )
     parser.add_argument(
         "--replay",
         type=Path,
         default=None,
-        help="optional path for JSON run report",
+        help="optional path for MessagePack run report",
     )
     parser.add_argument(
         "--batch",

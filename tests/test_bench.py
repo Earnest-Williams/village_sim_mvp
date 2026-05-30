@@ -3,16 +3,72 @@
 from __future__ import annotations
 
 import io
-import json
 import unittest
 from contextlib import redirect_stdout
-from pathlib import Path
 from typing import Any
 
 from village_sim.bench import print_report, run_benchmark
 from village_sim.sim.profile import TIMING_CATEGORIES
 
-FIXTURE_PATH = Path(__file__).parent / "fixtures" / "bench_representative_outputs.json"
+EXPECTED_REPRESENTATIVE_OUTPUTS: list[dict[str, Any]] = [
+    {
+        "seed": 1,
+        "ticks": 144,
+        "days_elapsed": 1.0,
+        "survived": True,
+        "death_reason": None,
+        "final_health": 1.0,
+        "final_thirst": 0.6279999999999971,
+        "final_hunger": 0.5009999999999963,
+        "final_fatigue": 0.0,
+        "final_cold_stress": 0.1440000000000001,
+        "water_discoveries": 26,
+        "food_discoveries": 7,
+        "distance_walked": 78,
+        "remembered_water_sites": 26,
+        "remembered_food_sites": 7,
+        "action_library_size": 0,
+        "goap_plan_executions": 0,
+    },
+    {
+        "seed": 2,
+        "ticks": 144,
+        "days_elapsed": 1.0,
+        "survived": True,
+        "death_reason": None,
+        "final_health": 1.0,
+        "final_thirst": 0.6279999999999972,
+        "final_hunger": 0.5009999999999963,
+        "final_fatigue": 0.0,
+        "final_cold_stress": 0.12100000000000008,
+        "water_discoveries": 197,
+        "food_discoveries": 6,
+        "distance_walked": 77,
+        "remembered_water_sites": 197,
+        "remembered_food_sites": 6,
+        "action_library_size": 0,
+        "goap_plan_executions": 0,
+    },
+    {
+        "seed": 3,
+        "ticks": 144,
+        "days_elapsed": 1.0,
+        "survived": True,
+        "death_reason": None,
+        "final_health": 1.0,
+        "final_thirst": 0.6279999999999969,
+        "final_hunger": 0.5009999999999967,
+        "final_fatigue": 0.0,
+        "final_cold_stress": 0.06650000000000003,
+        "water_discoveries": 23,
+        "food_discoveries": 8,
+        "distance_walked": 72,
+        "remembered_water_sites": 23,
+        "remembered_food_sites": 8,
+        "action_library_size": 0,
+        "goap_plan_executions": 0,
+    },
+]
 
 
 class TestBenchmarkRunner(unittest.TestCase):
@@ -53,8 +109,7 @@ class TestBenchmarkRunner(unittest.TestCase):
                 }
             )
 
-        expected = json.loads(FIXTURE_PATH.read_text())
-        self.assertEqual(actual, expected)
+        self.assertEqual(actual, EXPECTED_REPRESENTATIVE_OUTPUTS)
 
     def test_report_includes_performance_counters_and_timing_splits(self) -> None:
         report = run_benchmark(

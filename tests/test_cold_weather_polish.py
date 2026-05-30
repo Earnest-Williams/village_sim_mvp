@@ -104,7 +104,7 @@ class ColdWeatherPolishTests(unittest.TestCase):
         )
         sim = Simulation(config)
         result = sim.run()
-        payload = result.to_json_obj()
+        payload = result.to_msgpack_obj()
 
         self.assertIn("final_temperature_c", payload)
         self.assertIn("final_feels_cold", payload)

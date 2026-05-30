@@ -29,7 +29,7 @@ class AgentSnapshot:
     decision_memory_confidence: float = 0.0
     memory_use_ratio: float = 0.0
 
-    def to_json_obj(self) -> dict[str, Any]:
+    def to_msgpack_obj(self) -> dict[str, Any]:
         return asdict(self)
 
 
@@ -46,5 +46,5 @@ class WorldSnapshot:
     feels_cold: bool = False
     cold_reason: str = "none"
 
-    def to_json_obj(self) -> dict[str, Any]:
+    def to_msgpack_obj(self) -> dict[str, Any]:
         return asdict(self)

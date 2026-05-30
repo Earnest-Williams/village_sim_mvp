@@ -18,5 +18,5 @@ class TickEvent:
     x: int
     y: int
 
-    def to_json_obj(self) -> dict[str, Any]:
+    def to_msgpack_obj(self) -> dict[str, Any]:
         return asdict(self)

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,7 +13,7 @@ from village_sim.core.config import SimConfig
 from village_sim.core.time import clock_from_tick
 from village_sim.core.types import Position
 from village_sim.sim.engine import Simulation
-from village_sim.sim.replay import write_run_report
+from village_sim.sim.replay import read_run_report, write_run_report
 from village_sim.world.discoverables import Discoverable
 from village_sim.world.weather import make_weather_state
 
@@ -198,17 +197,18 @@ class TestWeatherColdAwareness(unittest.TestCase):
         sim.snapshots.append(snapshot)
         result = sim.result()
         with tempfile.TemporaryDirectory() as temp_dir:
-            replay_path = Path(temp_dir) / "replay.json"
+            replay_path = Path(temp_dir) / "replay.msgpack"
             write_run_report(replay_path, config, result, sim.events, sim.snapshots)
-            payload: dict[str, Any] = json.loads(replay_path.read_text())
+            payload: dict[str, Any] = read_run_report(replay_path)
 
         replay_snapshot = payload["snapshots"][0]
-        replay_agent = replay_snapshot["agents"][0]
-        self.assertIn("temperature_c", replay_snapshot)
-        self.assertIn("feels_cold", replay_snapshot)
-        self.assertIn("cold_reason", replay_snapshot)
-        self.assertIn("feels_cold", replay_agent)
-        self.assertIn("is_sheltered", replay_agent)
+        self.assertTrue(hasattr(replay_snapshot, "temperature_c"))
+        self.assertTrue(hasattr(replay_snapshot, "feels_cold"))
+        self.assertTrue(hasattr(replay_snapshot, "cold_reason"))
+        self.assertTrue(hasattr(replay_snapshot, "agents"))
+        replay_agent = replay_snapshot.agents[0]
+        self.assertTrue(hasattr(replay_agent, "feels_cold"))
+        self.assertTrue(hasattr(replay_agent, "is_sheltered"))
 
     def test_goap_shelter_behavior_logs_shelter_action(self) -> None:
         config = SimConfig(

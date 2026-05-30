@@ -224,7 +224,7 @@ class TestGoapEndToEnd(unittest.TestCase):
         _synthesize_spring_travel_actions(sim)
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "actions.json"
+            path = Path(temp_dir) / "actions.msgpack"
             sim.action_library.save(path)
             loaded = ActionLibrary.load(path)
 

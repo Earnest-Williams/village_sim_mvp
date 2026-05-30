@@ -225,7 +225,7 @@ Raw simulation state is converted into symbolic facts.
 
 Example symbolic state:
 
-```json
+```msgpack
 {
   "hunger_bucket": "high",
   "thirst_bucket": "low",
@@ -432,7 +432,7 @@ A synthesized action is structured data.
 
 It should be directly parseable by the planner.
 
-```json
+```msgpack
 {
   "schema_version": 1,
   "action_id": "action_exploit_berry_bush_001_v1",
@@ -606,7 +606,7 @@ def infer_hard_preconditions(
 
 Example result:
 
-```json
+```msgpack
 {
   "at_discoverable": true,
   "target_type": "berry_bush",
@@ -671,7 +671,7 @@ def infer_need_effect(
 
 Example induced effect:
 
-```json
+```msgpack
 {
   "hunger_delta": {
     "mean": -0.35,
@@ -699,7 +699,7 @@ def average_cost(trajectories: list[Trajectory]) -> float:
 
 Initial cost model:
 
-```json
+```msgpack
 {
   "base_ticks": 6,
   "distance_weight": 0.0,
@@ -773,7 +773,7 @@ synthesized action library
 
 Example goal:
 
-```json
+```msgpack
 {
   "hunger_bucket": "low"
 }
@@ -806,7 +806,7 @@ The action itself does not contain code.
 
 It contains a payload reference.
 
-```json
+```msgpack
 {
   "type": "RL_POLICY",
   "policy_id": "policy_exploit_berry_bush_v1",
@@ -841,7 +841,7 @@ Knowledge should be split into two packet types.
 
 ### World fact packet
 
-```json
+```msgpack
 {
   "knowledge_type": "world_fact",
   "fact_type": "resource_location",
@@ -857,7 +857,7 @@ Knowledge should be split into two packet types.
 
 ### Action knowledge packet
 
-```json
+```msgpack
 {
   "knowledge_type": "action_model",
   "source_agent_id": "pioneer_001",
@@ -999,7 +999,7 @@ FRESHWATER_SPRING_001 = Discoverable(
 
 Expected induced instance action:
 
-```json
+```msgpack
 {
   "action_id": "action_exploit_freshwater_spring_001_v1",
   "display_name": "Exploit freshwater spring 001",
@@ -1040,7 +1040,7 @@ Expected induced instance action:
 
 Expected induced template action:
 
-```json
+```msgpack
 {
   "action_id": "action_exploit_freshwater_spring_template_v1",
   "display_name": "Exploit freshwater spring",
@@ -1108,7 +1108,7 @@ BERRY_BUSH_001 = Discoverable(
 
 Expected induced instance action:
 
-```json
+```msgpack
 {
   "action_id": "action_exploit_berry_bush_001_v1",
   "display_name": "Exploit berry bush 001",
@@ -1175,7 +1175,7 @@ Expected induced instance action:
 
 Expected induced template action:
 
-```json
+```msgpack
 {
   "action_id": "action_exploit_berry_bush_template_v1",
   "display_name": "Exploit berry bush",
@@ -1614,8 +1614,8 @@ It should generate data.
 
 ```text
 Generated:
-    JSON action models
-    JSON world facts
+    MessagePack action models
+    MessagePack world facts
     policy references
     confidence statistics
 
@@ -2534,7 +2534,7 @@ def average_cost(trajectories: list[Trajectory]) -> float:
 
 from __future__ import annotations
 
-import json
+import msgpack
 from dataclasses import dataclass, field, asdict
 from enum import StrEnum
 from pathlib import Path
@@ -2620,12 +2620,12 @@ class SynthesizedAction:
     def to_dict(self) -> dict:
         return asdict(self)         # type: ignore[arg-type]
 
-    def to_json(self, indent: int = 2) -> str:
-        return json.dumps(self.to_dict(), indent=indent)
+    def to_msgpack(self) -> bytes:
+        return msgpack.packb(self.to_dict(), use_bin_type=True)
 
     @staticmethod
     def from_dict(data: dict) -> SynthesizedAction:
-        """Deserialise from a plain dict (e.g. loaded from JSON)."""
+        """Deserialise from a plain dict (e.g. loaded from MessagePack)."""
         return SynthesizedAction(
             schema_version=data["schema_version"],
             action_id=data["action_id"],
@@ -2679,7 +2679,7 @@ def promote_action(action: SynthesizedAction) -> None:
 # ── Action library (§33 step 11) ─────────────────────────────────────────────
 
 class ActionLibrary:
-    """In-memory store for synthesized actions, with JSON persistence."""
+    """In-memory store for synthesized actions, with MessagePack persistence."""
 
     def __init__(self) -> None:
         self._actions: dict[str, SynthesizedAction] = {}
@@ -2708,14 +2708,14 @@ class ActionLibrary:
         ]
 
     def save(self, path: Path) -> None:
-        """Serialise all actions to a JSON file. Generates data, not code (§34)."""
+        """Serialise all actions to a MessagePack file. Generates data, not code (§34)."""
         data = [a.to_dict() for a in self._actions.values()]
-        path.write_text(json.dumps(data, indent=2))
+        path.write_bytes(msgpack.packb(data, use_bin_type=True))
 
     @classmethod
     def load(cls, path: Path) -> ActionLibrary:
         library = cls()
-        for item in json.loads(path.read_text()):
+        for item in msgpack.unpackb(path.read_bytes(), raw=False):
             library.add(SynthesizedAction.from_dict(item))
         return library
 ```
@@ -3066,7 +3066,7 @@ class ExecutorRegistry:
 
 from __future__ import annotations
 
-import json
+import msgpack
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
@@ -3121,11 +3121,11 @@ def imported_confidence(
 
 def save_packets(packets: list[KnowledgePacket], path: Path) -> None:
     data = [p.to_dict() for p in packets]
-    path.write_text(json.dumps(data, indent=2))
+    path.write_bytes(msgpack.packb(data, use_bin_type=True))
 
 
 def load_packets(path: Path) -> list[dict]:
-    return json.loads(path.read_text())
+    return msgpack.unpackb(path.read_bytes(), raw=False)
 ```
 
 ---
@@ -3586,7 +3586,7 @@ if __name__ == "__main__":
 
 from __future__ import annotations
 
-import json
+import msgpack
 import tempfile
 import unittest
 from pathlib import Path
@@ -3624,7 +3624,7 @@ class TestKnowledgePacketSerialisation(unittest.TestCase):
             data={"resource_id": "spring_001", "resource_type": "freshwater_spring",
                   "coordinates": [12, 12]},
         )
-        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix=".msgpack", delete=False) as f:
             path = Path(f.name)
         save_packets([packet], path)
         loaded = load_packets(path)
@@ -3824,14 +3824,14 @@ All implementation steps above respect the following invariant:
 
 | ✅ Do | ❌ Never |
 |---|---|
-| Generate JSON action models | Generate Python source code at runtime |
-| Generate JSON world facts | Generate `exec()` or `eval()` calls |
+| Generate MessagePack action models | Generate Python source code at runtime |
+| Generate MessagePack world facts | Generate `exec()` or `eval()` calls |
 | Store policy references as strings | Instantiate new classes dynamically |
 | Store confidence statistics as data | Alter `sys.modules` or patch classes |
-| Read/write `ActionLibrary` as JSON files | Emit executable scripts |
+| Read/write `ActionLibrary` as MessagePack files | Emit executable scripts |
 
 The `save()` / `load()` methods on `ActionLibrary` and the `save_packets()` helper in
-`knowledge.py` fulfil this constraint by reading and writing plain JSON.
+`knowledge.py` fulfil this constraint by reading and writing plain MessagePack.
 
 ---
 
