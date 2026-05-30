@@ -1,8 +1,17 @@
 # Mamba/Conda environment specification for 'village_sim_mvp'
-# Edit me to add your project's dependencies!
 name: village_sim_mvp
 channels:
   - conda-forge
+  - nodefaults
 dependencies:
-  - python=3.11
+  - python=3.12
   - pip
+  
+  # Core dependencies
+  - numpy >=2.4
+  - numba >=0.62
+  - polars >=1.41
+  - msgpack-python >=1.0  # conda-forge package name for msgpack
+  
+  # Optional GUI dependencies
+  - wxpython >=4.2
