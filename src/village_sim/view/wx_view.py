@@ -592,6 +592,31 @@ class VillageSimFrame(wx.Frame):  # type: ignore[misc]
                 f"status={result.cold_status_events} "
                 f"shelter={result.shelter_events}"
             ),
+            "Learning:",
+            (
+                "  Water memories: "
+                f"{result.remembered_water_sites}, "
+                f"Food memories: {result.remembered_food_sites}"
+            ),
+            (
+                "  Memory-directed resource decisions: "
+                f"{result.learning.memory_directed_resource_ticks}"
+            ),
+            (
+                "  Exploration-directed resource decisions: "
+                f"{result.learning.exploration_resource_ticks}"
+            ),
+            f"  Memory use ratio: {result.learning.memory_use_ratio:.2f}",
+            (
+                "  Reinforced memories: "
+                f"water={result.learning.memory_reinforced_water} "
+                f"food={result.learning.memory_reinforced_food}"
+            ),
+            (
+                "  Failed memories: "
+                f"water={result.learning.memory_failed_water} "
+                f"food={result.learning.memory_failed_food}"
+            ),
             f"Events logged: {event_count}",
             f"Snapshots stored: {snapshot_count}",
         ]

@@ -103,6 +103,7 @@ def main() -> None:
         sim.action_library = ActionLibrary.load(args.action_library_in)
     result: SimResult = sim.run(snapshot_every=args.snapshot_every)
     print_result(result)
+    print_learning_summary(result)
     print_cold_summary(result)
 
     if args.print_map:
@@ -159,6 +160,49 @@ def run_batch(args: argparse.Namespace) -> None:
             f"{result.final_feels_cold},{result.final_is_sheltered},"
             f"{result.cold_weather_events},{result.cold_status_events},"
             f"{result.shelter_events}"
+        )
+
+
+def print_learning_summary(result: SimResult) -> None:
+    learning = result.learning
+    print("Learning:")
+    print(
+        f"  learned water sites={learning.learned_water_sites} "
+        f"food sites={learning.learned_food_sites}"
+    )
+    print(
+        f"  remembered water selections={learning.memory_selected_water} "
+        f"remembered food selections={learning.memory_selected_food}"
+    )
+    print(
+        f"  memory reinforcements: water={learning.memory_reinforced_water} "
+        f"food={learning.memory_reinforced_food}"
+    )
+    print(
+        f"  memory failures: water={learning.memory_failed_water} "
+        f"food={learning.memory_failed_food}"
+    )
+    print(
+        "  resource decisions: "
+        f"memory-directed={learning.memory_directed_resource_ticks} "
+        f"explore-directed={learning.exploration_resource_ticks} "
+        f"memory_use_ratio={learning.memory_use_ratio:.2f}"
+    )
+    if result.best_water_memory_x >= 0 and result.best_water_memory_y >= 0:
+        print(
+            "  water memory: "
+            f"x={result.best_water_memory_x} y={result.best_water_memory_y} "
+            f"confidence={result.best_water_memory_confidence:.2f} "
+            f"uses={result.best_water_memory_successful_uses} "
+            f"failures={result.best_water_memory_failed_uses}"
+        )
+    if result.best_food_memory_x >= 0 and result.best_food_memory_y >= 0:
+        print(
+            "  food memory: "
+            f"x={result.best_food_memory_x} y={result.best_food_memory_y} "
+            f"confidence={result.best_food_memory_confidence:.2f} "
+            f"uses={result.best_food_memory_successful_uses} "
+            f"failures={result.best_food_memory_failed_uses}"
         )
 
 
