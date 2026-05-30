@@ -219,8 +219,8 @@ class BankedMaintenanceTests(unittest.TestCase):
         state = build_water_system_state(
             width=4, height=1, terrain=terrain, water=water
         )
-        state.soil_water = [0.5, 0.5, 0.5, 0.5]
-        state.wetness = [0.5, 0.5, 0.5, 0.5]
+        state.soil_water.fill(0.5)
+        state.wetness.fill(0.5)
 
         step_water_maintenance_bank(
             tick=1, water=water, state=state, config=SimConfig()
